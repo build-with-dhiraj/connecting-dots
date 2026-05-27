@@ -20,7 +20,8 @@ def main(argv: list[str]) -> int:
     data = json.loads(raw)
     env = InboundEnvelope.model_validate(data)
     print(
-        f"OK message_id={env.message_id} source={env.source.value} url={env.url} "
+        f"OK message_id={env.message_id} type={env.message_type.value} "
+        f"source={env.source.value} url={env.url} "
         f"captured_at={env.captured_at.isoformat()}"
     )
     return 0

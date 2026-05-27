@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from connecting_dots.inbound_envelope import InboundEnvelope
+from connecting_dots.inbound_envelope import InboundEnvelope, MessageType
 from connecting_dots.handlers.base import Handler, HandlerNotFound
 from connecting_dots.types import NoteRecord
 
@@ -390,6 +390,90 @@ def dispatch_url(
 
 
 # --------------------------------------------------------------------------- #
+# Envelope-level entry point (handles all message_types, not just URL)
+# --------------------------------------------------------------------------- #
+def dispatch_envelope(
+    envelope: InboundEnvelope,
+    *,
+    dedupe_db: Path | None = None,
+) -> NoteRecord | None:
+    """Route an `InboundEnvelope` by its `message_type`.
+
+    - `message_type == "url"` -> delegate to the existing `dispatch_url`
+      handler-routing path. URL-bearing captures (WhatsApp text-with-URL,
+      mailto, LinkedIn, manual) continue to land in their per-domain
+      handlers (youtube/instagram/linkedin/web).
+    - Everything else -> delegate to `RawHandler` and persist a raw note
+      under `vault/inbox/_raw/` for component #5 to enrich later. The
+      raw handler is invoked directly (bypassing URL matching) because
+      these envelopes don't carry a URL to route on.
+
+    The mailto poller and LinkedIn ZIP watcher still call `dispatch_url`
+    directly; they don't go through `dispatch_envelope`. The stream
+    consumer is the primary caller — it routes everything from Upstash
+    through here.
+    """
+    mt = envelope.message_type
+
+    if mt == MessageType.url:
+        # Existing URL-routing path, unchanged.
+        return dispatch_url(
+            url=str(envelope.url),
+            source=envelope.source.value,
+            captured_at=envelope.captured_at,
+            raw_payload=envelope.raw_payload,
+            # NB: the stream consumer already claimed message_id in the
+            # shared dedupe table — we pass None here so the dispatcher
+            # doesn't see its own claim and no-op. Callers wanting
+            # standalone dedupe should call `dispatch_url` directly.
+            message_id=None,
+            dedupe_db=dedupe_db,
+        )
+
+    # Non-URL envelopes -> RawHandler. Import lazily so the dispatcher
+    # boots even if `handlers.raw` hasn't been deployed yet (mirrors the
+    # rest of the registry resolution pattern).
+    try:
+        from connecting_dots.handlers.raw import handler as raw_handler
+    except ImportError:  # pragma: no cover — handler ships in same commit
+        logger.exception("[dispatch] raw handler not importable — dropping non-URL envelope")
+        return None
+
+    try:
+        record = raw_handler.handle(envelope)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[dispatch] raw handler raised on message_type=%s", mt)
+        record = NoteRecord(
+            source=envelope.source.value,
+            handler="failed",
+            url=str(envelope.url) if envelope.url is not None else "",
+            title=f"WhatsApp {mt.value}",
+            text="",
+            captured_at=envelope.captured_at,
+            raw_meta={
+                "error": f"{type(exc).__name__}: {exc}",
+                "message_type": mt.value,
+                "raw_payload": envelope.raw_payload,
+            },
+        )
+
+    try:
+        _write_record(record)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[dispatch] vault write failed for raw envelope message_id=%s",
+            envelope.message_id,
+        )
+        raise
+
+    logger.info(
+        "[dispatch] handler=%s wrote raw note message_id=%s type=%s",
+        record.handler, envelope.message_id, mt.value,
+    )
+    return record
+
+
+# --------------------------------------------------------------------------- #
 # Envelope construction
 # --------------------------------------------------------------------------- #
 def _build_envelope(
@@ -415,6 +499,7 @@ def _build_envelope(
     return InboundEnvelope.model_validate(
         {
             "message_id": mid,
+            "message_type": "url",
             "url": url,
             "source": str(source),
             "captured_at": ts.isoformat(),

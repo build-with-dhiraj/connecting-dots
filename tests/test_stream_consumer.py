@@ -3,7 +3,7 @@
 These tests exercise the pure-Python pieces of the Upstash Redis Stream bridge
 (XREAD response parsing, offset checkpointing, DLQ append, per-entry processing
 with dedupe + dispatch, the `run_once` loop, and SQLite WAL concurrency) without
-ever touching the network. `dispatch_url` is patched and the SQLite dedupe DB is
+ever touching the network. `dispatch_envelope` is patched and the SQLite dedupe DB is
 redirected to a `tmp_path`.
 
 Tests must be deterministic and < 1s each.
@@ -50,14 +50,30 @@ def _make_envelope(
     message_id: str = "wamid.test1",
     url: str = "https://example.com/post",
     source: str = "whatsapp",
+    message_type: str = "url",
+    text: str | None = None,
+    media_id: str | None = None,
+    media_mime_type: str | None = None,
+    media_filename: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    env: dict[str, Any] = {
         "message_id": message_id,
-        "url": url,
+        "message_type": message_type,
         "source": source,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "raw_payload": {"from": "+1555", "id": message_id},
     }
+    if message_type == "url":
+        env["url"] = url
+    if text is not None:
+        env["text"] = text
+    if media_id is not None:
+        env["media_id"] = media_id
+    if media_mime_type is not None:
+        env["media_mime_type"] = media_mime_type
+    if media_filename is not None:
+        env["media_filename"] = media_filename
+    return env
 
 
 # --------------------------------------------------------------------------- #
@@ -194,12 +210,15 @@ class TestProcessEntry:
     def test_happy_path_dispatches_and_dedupes(self, tmp_paths, dedupe_conn):
         env = _make_envelope(message_id="msg-happy")
         fields = {"envelope": json.dumps(env)}
-        with mock.patch.object(stream_consumer, "dispatch_url") as mock_dispatch:
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
             stream_consumer._process_entry("1-0", fields, dedupe_conn)
             assert mock_dispatch.call_count == 1
-            kwargs = mock_dispatch.call_args.kwargs
-            assert kwargs["url"] == "https://example.com/post"
-            assert kwargs["source"] == "whatsapp"
+            # _process_entry calls dispatch_envelope(env) — a single positional
+            # InboundEnvelope. Pull it out and assert on the parsed model.
+            (called_env,) = mock_dispatch.call_args.args
+            assert str(called_env.url) == "https://example.com/post"
+            assert called_env.source.value == "whatsapp"
+            assert called_env.message_type.value == "url"
             # Dedupe row should now exist.
             row = dedupe_conn.execute(
                 "SELECT message_id FROM seen_message_ids WHERE message_id=?",
@@ -207,29 +226,49 @@ class TestProcessEntry:
             ).fetchone()
             assert row is not None
 
+    def test_routes_non_url_envelope_to_dispatch_envelope(self, tmp_paths, dedupe_conn):
+        """A WhatsApp text-only envelope (no URL) must reach dispatch_envelope —
+        the regression that motivated this work was the webhook silently
+        dropping it before the stream ever saw it. End-to-end via the stream
+        consumer, we now assert it lands in dispatch_envelope intact."""
+        env = _make_envelope(
+            message_id="msg-text-only",
+            message_type="text",
+            text="hello world no urls here",
+            url="ignored",  # will be omitted by _make_envelope
+        )
+        fields = {"envelope": json.dumps(env)}
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
+            stream_consumer._process_entry("1-0", fields, dedupe_conn)
+            assert mock_dispatch.call_count == 1
+            (called_env,) = mock_dispatch.call_args.args
+            assert called_env.message_type.value == "text"
+            assert called_env.url is None
+            assert called_env.text == "hello world no urls here"
+
     def test_dedupe_collision_skips_dispatch(self, tmp_paths, dedupe_conn):
         env = _make_envelope(message_id="msg-dup")
         fields = {"envelope": json.dumps(env)}
-        with mock.patch.object(stream_consumer, "dispatch_url") as mock_dispatch:
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
             stream_consumer._process_entry("1-0", fields, dedupe_conn)
             stream_consumer._process_entry("2-0", fields, dedupe_conn)
             assert mock_dispatch.call_count == 1  # second call deduped
 
     def test_missing_envelope_field_skipped(self, tmp_paths, dedupe_conn):
-        with mock.patch.object(stream_consumer, "dispatch_url") as mock_dispatch:
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
             stream_consumer._process_entry("1-0", {"not_envelope": "x"}, dedupe_conn)
             mock_dispatch.assert_not_called()
 
     def test_malformed_envelope_skipped(self, tmp_paths, dedupe_conn):
         fields = {"envelope": "not json"}
-        with mock.patch.object(stream_consumer, "dispatch_url") as mock_dispatch:
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
             stream_consumer._process_entry("1-0", fields, dedupe_conn)
             mock_dispatch.assert_not_called()
 
     def test_schema_violation_envelope_skipped(self, tmp_paths, dedupe_conn):
         """Valid JSON but missing required fields -> InboundEnvelope rejects."""
         fields = {"envelope": json.dumps({"message_id": "x"})}  # missing url/source/...
-        with mock.patch.object(stream_consumer, "dispatch_url") as mock_dispatch:
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
             stream_consumer._process_entry("1-0", fields, dedupe_conn)
             mock_dispatch.assert_not_called()
 
@@ -238,7 +277,7 @@ class TestProcessEntry:
         env = _make_envelope(message_id="msg-fail")
         fields = {"envelope": json.dumps(env)}
         with mock.patch.object(
-            stream_consumer, "dispatch_url", side_effect=RuntimeError("boom")
+            stream_consumer, "dispatch_envelope", side_effect=RuntimeError("boom")
         ):
             # Should not raise.
             stream_consumer._process_entry("1-0", fields, dedupe_conn)
@@ -290,7 +329,7 @@ class TestRunOnce:
             ]
         ]
         fake = _FakeRedis(response=resp)
-        with mock.patch.object(stream_consumer, "dispatch_url") as mock_dispatch:
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
             last = stream_consumer.run_once(fake, dedupe_conn)
         assert last == "1700-0"
         assert tmp_paths["offset"].read_text() == "1700-0"
@@ -303,7 +342,7 @@ class TestRunOnce:
             entries.append([f"170{i}-0", ["envelope", json.dumps(env)]])
         resp = [[stream_consumer.STREAM_KEY, entries]]
         fake = _FakeRedis(response=resp)
-        with mock.patch.object(stream_consumer, "dispatch_url") as mock_dispatch:
+        with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
             last = stream_consumer.run_once(fake, dedupe_conn)
         assert last == "1704-0"
         assert tmp_paths["offset"].read_text() == "1704-0"
@@ -320,7 +359,7 @@ class TestRunOnce:
         # continues and the offset still advances past all entries.
         with mock.patch.object(
             stream_consumer,
-            "dispatch_url",
+            "dispatch_envelope",
             side_effect=[None, RuntimeError("middle"), None],
         ):
             last = stream_consumer.run_once(fake, dedupe_conn)
