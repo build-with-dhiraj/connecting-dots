@@ -209,6 +209,139 @@ def test_handler_exception_produces_degraded_record(
     assert captured_writes[0]["url"] == "https://will-fail.example/x"
 
 
+# --------------------------------------------------------------------------- #
+# dispatch_envelope — routes by message_type
+# --------------------------------------------------------------------------- #
+def _envelope(
+    *,
+    message_type: str,
+    message_id: str = "wamid.env-test",
+    url: str | None = None,
+    text: str | None = None,
+    media_id: str | None = None,
+    media_mime_type: str | None = None,
+    media_filename: str | None = None,
+) -> InboundEnvelope:
+    data: dict[str, Any] = {
+        "message_id": message_id,
+        "message_type": message_type,
+        "source": "whatsapp",
+        "captured_at": _now().isoformat(),
+        "raw_payload": {"meta": True},
+    }
+    if url is not None:
+        data["url"] = url
+    if text is not None:
+        data["text"] = text
+    if media_id is not None:
+        data["media_id"] = media_id
+    if media_mime_type is not None:
+        data["media_mime_type"] = media_mime_type
+    if media_filename is not None:
+        data["media_filename"] = media_filename
+    return InboundEnvelope.model_validate(data)
+
+
+def test_dispatch_envelope_routes_url(
+    captured_writes: list[dict[str, Any]],
+    isolated_dedupe: Path,
+) -> None:
+    """A URL envelope must traverse the existing per-domain handler routing."""
+    yt = MockHandler(name="youtube", domains=("youtube.com", "youtu.be"))
+    web = _AlwaysMatchHandler(name="web")
+    dispatcher.set_handlers([yt, web])
+
+    env = _envelope(
+        message_type="url",
+        message_id="env-url-1",
+        url="https://www.youtube.com/watch?v=abc",
+    )
+    record = dispatcher.dispatch_envelope(env)
+
+    assert record is not None
+    assert record.handler == "youtube"
+    assert len(yt.calls) == 1
+    assert len(web.calls) == 0
+    assert len(captured_writes) == 1
+
+
+def test_dispatch_envelope_routes_text(
+    captured_writes: list[dict[str, Any]],
+    isolated_dedupe: Path,
+) -> None:
+    """A text envelope (no URL) must land in the RawHandler — not a URL handler."""
+    yt = MockHandler(name="youtube", domains=("youtube.com",))
+    web = _AlwaysMatchHandler(name="web")
+    dispatcher.set_handlers([yt, web])
+
+    env = _envelope(
+        message_type="text",
+        message_id="env-text-1",
+        text="just a plain note saved to my second brain",
+    )
+    record = dispatcher.dispatch_envelope(env)
+
+    assert record is not None
+    assert record.handler == "raw"
+    assert record.text == "just a plain note saved to my second brain"
+    # Neither URL handler must have been called — non-URL envelopes bypass
+    # per-domain matching entirely.
+    assert len(yt.calls) == 0
+    assert len(web.calls) == 0
+    assert len(captured_writes) == 1
+    assert captured_writes[0]["handler"] == "raw"
+    assert captured_writes[0]["raw_meta"]["message_type"] == "text"
+
+
+def test_dispatch_envelope_routes_image(
+    captured_writes: list[dict[str, Any]],
+    isolated_dedupe: Path,
+) -> None:
+    """An image envelope carries media_id; RawHandler stashes it in raw_meta
+    so component #5 can download from Meta's media endpoint later."""
+    dispatcher.set_handlers([_AlwaysMatchHandler(name="web")])
+
+    env = _envelope(
+        message_type="image",
+        message_id="env-image-1",
+        media_id="meta-media-id-xyz",
+        media_mime_type="image/jpeg",
+        text="caption: my receipt",
+    )
+    record = dispatcher.dispatch_envelope(env)
+
+    assert record is not None
+    assert record.handler == "raw"
+    assert record.raw_meta["message_type"] == "image"
+    assert record.raw_meta["media_id"] == "meta-media-id-xyz"
+    assert record.raw_meta["media_mime_type"] == "image/jpeg"
+    assert record.raw_meta["pending_enrichment"] is True
+    assert record.text == "caption: my receipt"
+    assert len(captured_writes) == 1
+
+
+def test_dispatch_envelope_routes_document_with_filename(
+    captured_writes: list[dict[str, Any]],
+    isolated_dedupe: Path,
+) -> None:
+    dispatcher.set_handlers([_AlwaysMatchHandler(name="web")])
+
+    env = _envelope(
+        message_type="document",
+        message_id="env-doc-1",
+        media_id="meta-doc-id",
+        media_mime_type="application/pdf",
+        media_filename="receipt-2026-05.pdf",
+    )
+    record = dispatcher.dispatch_envelope(env)
+
+    assert record is not None
+    assert record.handler == "raw"
+    assert record.raw_meta["media_filename"] == "receipt-2026-05.pdf"
+    # No body text -> title derived from "WhatsApp <type>".
+    assert record.title == "WhatsApp document"
+
+
 def test_missing_handler_module_does_not_break_registry(
     monkeypatch: pytest.MonkeyPatch,
     captured_writes: list[dict[str, Any]],

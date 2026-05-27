@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from pydantic import AnyUrl
 
-from connecting_dots.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, MessageType, Source
 from connecting_dots.handlers.linkedin import LinkedInHandler, _strip_tracking
 from workers import linkedin_zip_watcher as w
 
@@ -375,6 +375,7 @@ def test_strip_tracking_removes_known_params() -> None:
 def _envelope(url: str, raw_payload: dict[str, Any] | None = None) -> InboundEnvelope:
     return InboundEnvelope(
         message_id="li-test-1",
+        message_type=MessageType.url,
         url=AnyUrl(url),
         source=Source.linkedin,
         captured_at=datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc),

@@ -21,12 +21,13 @@ import respx
 from pydantic import AnyUrl
 
 from connecting_dots.handlers.linkedin import LinkedInHandler
-from connecting_dots.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, MessageType, Source
 
 
 def _make_envelope(url: str) -> InboundEnvelope:
     return InboundEnvelope(
         message_id="linkedin-test-1",
+        message_type=MessageType.url,
         url=AnyUrl(url),
         source=Source.linkedin,
         captured_at=datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc),

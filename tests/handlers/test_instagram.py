@@ -15,13 +15,14 @@ import pytest
 import respx
 from pydantic import AnyUrl
 
-from connecting_dots.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, MessageType, Source
 from connecting_dots.handlers.instagram import InstagramHandler, _strip_tracking
 
 
 def _make_envelope(url: str) -> InboundEnvelope:
     return InboundEnvelope(
         message_id="ig-test-1",
+        message_type=MessageType.url,
         url=AnyUrl(url),
         source=Source.whatsapp,
         captured_at=datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc),

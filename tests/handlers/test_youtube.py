@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from pydantic import AnyUrl
 
-from connecting_dots.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, MessageType, Source
 from connecting_dots.handlers import youtube as yt
 from connecting_dots.handlers.youtube import YouTubeHandler, extract_video_id
 
@@ -39,6 +39,7 @@ _FIXTURE_META: dict[str, Any] = {
 def _make_envelope(url: str) -> InboundEnvelope:
     return InboundEnvelope(
         message_id="test-1",
+        message_type=MessageType.url,
         url=AnyUrl(url),
         source=Source.whatsapp,
         captured_at=datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc),

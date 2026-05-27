@@ -8,6 +8,7 @@
 
 const envelope = {
   message_id: "wamid.TEST_BRIDGE_ROUNDTRIP_001",
+  message_type: "url",
   url: "https://example.com/article",
   source: "whatsapp",
   captured_at: new Date("2026-05-27T12:00:00Z").toISOString(),
