@@ -1,0 +1,70 @@
+/**
+ * Meta WhatsApp Cloud API webhook.
+ *
+ * GET  -> verify-token handshake (Meta calls this once when you register the URL).
+ * POST -> inbound message + status events. We HMAC-validate, extract messages, dispatch.
+ *
+ * Notes:
+ * - Runs on Node.js runtime (need crypto + fs).
+ * - We must read the raw body BEFORE JSON.parse so the HMAC matches Meta's signed bytes.
+ * - Always respond 200 quickly. Meta retries on non-2xx and can disable the webhook on
+ *   sustained failures. Heavy work belongs in component #2 (queue/dispatcher).
+ */
+import { NextRequest, NextResponse } from "next/server";
+import { verifyMetaSignature } from "@/lib/wa-signature";
+import { dispatchInboundMessage, extractInboundMessages } from "@/lib/inbound-dispatch";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function GET(req: NextRequest) {
+  const url = new URL(req.url);
+  const mode = url.searchParams.get("hub.mode");
+  const token = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge");
+
+  const expected = process.env.WA_VERIFY_TOKEN;
+  if (mode === "subscribe" && token && expected && token === expected) {
+    // Meta requires the raw challenge string echoed back, 200 OK, text/plain.
+    return new NextResponse(challenge ?? "", { status: 200, headers: { "content-type": "text/plain" } });
+  }
+  return new NextResponse("forbidden", { status: 403 });
+}
+
+export async function POST(req: NextRequest) {
+  const appSecret = process.env.WA_APP_SECRET;
+  if (!appSecret) {
+    console.error("[wa/webhook] WA_APP_SECRET not configured");
+    return NextResponse.json({ error: "server misconfigured" }, { status: 500 });
+  }
+
+  const raw = await req.text();
+  const signature = req.headers.get("x-hub-signature-256");
+
+  if (!verifyMetaSignature(raw, signature, appSecret)) {
+    console.warn("[wa/webhook] signature mismatch", { hasHeader: Boolean(signature) });
+    return NextResponse.json({ error: "invalid signature" }, { status: 401 });
+  }
+
+  let payload: any;
+  try {
+    payload = JSON.parse(raw);
+  } catch (err) {
+    console.error("[wa/webhook] invalid json", { err: String(err) });
+    return NextResponse.json({ error: "invalid json" }, { status: 400 });
+  }
+
+  const messages = extractInboundMessages(payload);
+  console.log("[wa/webhook] received", { messageCount: messages.length, object: payload?.object });
+
+  // Dispatch in parallel but never let a downstream failure cause Meta to retry — log and ack.
+  await Promise.allSettled(
+    messages.map((m) =>
+      dispatchInboundMessage(m).catch((err) => {
+        console.error("[wa/webhook] dispatch failed", { messageId: m.messageId, err: String(err) });
+      }),
+    ),
+  );
+
+  return NextResponse.json({ ok: true });
+}
