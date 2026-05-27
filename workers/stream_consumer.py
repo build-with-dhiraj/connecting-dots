@@ -3,7 +3,11 @@
 Reads `InboundEnvelope` records from the `inbound-stream` Upstash Redis Stream
 (populated by the Vercel WhatsApp webhook in TypeScript), deduplicates by
 `message_id` against a local SQLite table, and calls
-`connecting_dots.dispatcher.dispatch_url` for each new URL.
+`connecting_dots.dispatcher.dispatch_envelope` for each new envelope.
+
+The envelope's `message_type` decides downstream routing: URL envelopes hit
+the per-domain handlers (youtube/instagram/linkedin/web); media/text/etc
+envelopes land in the catch-all RawHandler for component #5 to enrich.
 
 Delivery semantics
 ------------------
@@ -64,7 +68,7 @@ from typing import Any
 
 from upstash_redis import Redis
 
-from connecting_dots.dispatcher import dispatch_url
+from connecting_dots.dispatcher import dispatch_envelope
 from connecting_dots.inbound_envelope import InboundEnvelope
 
 logger = logging.getLogger(__name__)
@@ -187,7 +191,7 @@ def _mark_seen(conn: sqlite3.Connection, message_id: str) -> bool:
 def _append_dlq(stream_id: str, fields: dict[str, str], error: str) -> None:
     """Append a poison-message entry to `data/dlq.jsonl` (P1-DLQ).
 
-    Called when `dispatch_url` raises. We write the raw stream fields (NOT
+    Called when `dispatch_envelope` raises. We write the raw stream fields (NOT
     just the parsed envelope) so a human can inspect even invalid payloads.
     The append is fsync'd because the offset advance immediately follows;
     we don't want a crash window where the offset moves past a failed
@@ -276,22 +280,22 @@ def _process_entry(
 
     try:
         # NB: we already claimed `message_id` in the shared dedupe table above,
-        # so we deliberately pass `message_id=None` here — otherwise the
-        # dispatcher would see its own claim and no-op.
-        dispatch_url(
-            url=str(env.url),
-            source=env.source.value,  # StrEnum -> str literal
-            captured_at=env.captured_at,
-            raw_payload=env.raw_payload,
-            message_id=None,
+        # so the dispatcher won't double-claim. `dispatch_envelope` routes by
+        # `message_type`: URL envelopes go through the per-domain handlers
+        # (youtube/instagram/linkedin/web); everything else (text, image,
+        # audio, video, document, location, contacts, interactive, unknown)
+        # lands in the RawHandler under `vault/inbox/_raw/` for component #5
+        # to enrich later.
+        dispatch_envelope(env)
+        logger.info(
+            "[stream] dispatched message_id=%s type=%s source=%s",
+            env.message_id, env.message_type.value, env.source.value,
         )
-        logger.info("[stream] dispatched message_id=%s url=%s source=%s",
-                    env.message_id, env.url, env.source.value)
     except Exception as exc:  # noqa: BLE001
         # At-least-once with DLQ: log, durably record the poison entry in
         # data/dlq.jsonl BEFORE the offset advances, then let the loop continue.
         # Dedupe already claimed message_id above, so we don't retry on replay.
-        logger.exception("[stream] dispatch_url failed for %s: %s", env.message_id, exc)
+        logger.exception("[stream] dispatch failed for %s: %s", env.message_id, exc)
         _append_dlq(stream_id, fields, str(exc))
 
 

@@ -6,7 +6,7 @@
  */
 
 /**
- * Cross-language envelope appended to the Upstash Redis Stream `inbound-stream`. Produced by ingest channels (Vercel WhatsApp webhook today; future LinkedIn/manual relays). Consumed by the Python `workers.stream_consumer` which calls `connecting_dots.dispatcher.dispatch_url`.
+ * Cross-language envelope appended to the Upstash Redis Stream `inbound-stream`. Produced by ingest channels (Vercel WhatsApp webhook today; future LinkedIn/manual relays). Consumed by the Python `workers.stream_consumer` which calls `connecting_dots.dispatcher.dispatch_envelope` (or, for URL-only legacy paths, `dispatch_url`).
  */
 export interface InboundEnvelope {
   /**
@@ -14,9 +14,40 @@ export interface InboundEnvelope {
    */
   message_id: string;
   /**
-   * The captured URL to dispatch. Channel-specific extraction has already happened upstream. Scheme MUST be http or https — other URI types (file://, mailto:, ftp://, javascript:, data:) are rejected at the boundary so the fetch handlers cannot be coerced into reading local files or non-network resources.
+   * What kind of inbound payload this envelope carries. `url` is the legacy shape (a text message that contained a link, or any URL-bearing capture from mailto/linkedin/manual). `text` is a plain WhatsApp text message with no URL. The media types carry a `media_id` referencing Meta's media-download endpoint; downstream component #5 fetches the bytes. `sticker` is currently filtered out at the webhook (pure expression, no signal); if one reaches here treat it as `unknown`. `contacts` / `interactive` / `unknown` are forwarded with raw_payload only — handlers decide what to do.
    */
-  url: string;
+  message_type:
+    | "url"
+    | "text"
+    | "image"
+    | "audio"
+    | "video"
+    | "document"
+    | "sticker"
+    | "location"
+    | "contacts"
+    | "interactive"
+    | "unknown";
+  /**
+   * The captured URL. Required iff `message_type == "url"`. Scheme MUST be http or https — other URI types (file://, mailto:, ftp://, javascript:, data:) are rejected at the boundary so the fetch handlers cannot be coerced into reading local files or non-network resources.
+   */
+  url?: string;
+  /**
+   * Meta `messages[].<type>.id` for media envelopes (image/audio/video/document/sticker). Component #5 calls Meta's media-download endpoint with this id to fetch the bytes; no bytes are stored in the envelope itself.
+   */
+  media_id?: string;
+  /**
+   * MIME type reported by Meta (e.g. `image/jpeg`, `audio/ogg`, `application/pdf`). Optional even on media envelopes — Meta sometimes omits it.
+   */
+  media_mime_type?: string;
+  /**
+   * Original filename for `message_type == "document"` (Meta's `messages[].document.filename`). Absent for other types.
+   */
+  media_filename?: string;
+  /**
+   * Free-text body. For `message_type == "text"` this is the message body. For image/video/document this is the user-supplied caption (may be empty). For `location` this is `"<lat>,<lon>"` plus optional address.
+   */
+  text?: string;
   /**
    * Origin channel — must match `connecting_dots.dispatcher.SourceChannel`.
    */
@@ -26,7 +57,7 @@ export interface InboundEnvelope {
    */
   captured_at: string;
   /**
-   * Channel-specific provenance blob (e.g. the Meta `messages[i]` object). Opaque to the consumer; forwarded verbatim to `dispatch_url`.
+   * Channel-specific provenance blob (e.g. the Meta `messages[i]` object). Opaque to the consumer; forwarded verbatim to the dispatcher.
    */
   raw_payload: {
     [k: string]: unknown;

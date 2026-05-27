@@ -17,13 +17,14 @@ import pytest
 import respx
 from pydantic import AnyUrl
 
-from connecting_dots.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, MessageType, Source
 from connecting_dots.handlers.web import WebHandler
 
 
 def _make_envelope(url: str) -> InboundEnvelope:
     return InboundEnvelope(
         message_id="web-test-1",
+        message_type=MessageType.url,
         url=AnyUrl(url),
         source=Source.mailto,
         captured_at=datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc),
@@ -239,6 +240,7 @@ def test_handle_rejects_non_http_scheme_envelope() -> None:
 
     env = GeneratedInboundEnvelope(
         message_id="web-test-1",
+        message_type=MessageType.url,
         url=AnyUrl("file:///etc/passwd"),
         source=Source.mailto,
         captured_at=datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc),
