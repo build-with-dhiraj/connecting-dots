@@ -15,7 +15,7 @@ import pytest
 import respx
 from pydantic import AnyUrl
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, Source
 from connecting_dots.handlers.instagram import InstagramHandler, _strip_tracking
 
 

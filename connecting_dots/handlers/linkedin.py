@@ -26,7 +26,10 @@ from html.parser import HTMLParser
 from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope
+import httpx
+
+from connecting_dots.inbound_envelope import InboundEnvelope
+from connecting_dots.handlers._safe_fetch import fetch_with_guards as _fetch_with_guards
 from connecting_dots.types import NoteRecord
 
 logger = logging.getLogger(__name__)
@@ -140,28 +143,45 @@ _DESKTOP_UA = (
 )
 
 
-def _fetch_og(url: str, *, timeout: float = 8.0) -> tuple[str, str]:
-    """Fetch a LinkedIn URL and return (title, description) from OG tags.
+def _fetch_og(url: str, *, timeout: float = 8.0) -> tuple[str, str, str | None]:
+    """Fetch a LinkedIn URL and return (title, description, error_reason).
 
-    Returns ("", "") on any failure — the caller degrades gracefully. Uses
-    stdlib `urllib` so we don't add a runtime dependency for the rare path.
+    Routes through the shared `fetch_with_guards` helper so every hop is
+    SSRF-checked, the redirect chain is capped at 5, and the response body
+    is bounded at 5 MB (`MAX_RESPONSE_BYTES`). Without those guards a
+    302 from a legitimate `linkedin.com` URL to e.g.
+    `http://169.254.169.254/...` would silently exfiltrate cloud-metadata
+    credentials.
+
+    On any failure returns ("", "", reason); on success returns
+    (title, description, None). The caller degrades gracefully.
     """
-    from urllib.error import URLError
-    from urllib.request import Request, urlopen
-
-    req = Request(url, headers={"User-Agent": _DESKTOP_UA, "Accept": "text/html,*/*"})
     try:
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — http(s) only, see matches()
-            charset = resp.headers.get_content_charset() or "utf-8"
-            # 256 KB is enough for OG tags + falls back gracefully on huge pages.
-            body = resp.read(256 * 1024).decode(charset, errors="replace")
-    except (URLError, TimeoutError, ValueError) as exc:
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            resp, _final_url, err = _fetch_with_guards(
+                client,
+                url,
+                headers={"User-Agent": _DESKTOP_UA, "Accept": "text/html,*/*"},
+            )
+    except httpx.HTTPError as exc:
         logger.info("[linkedin] live fetch failed for %s: %s", url, exc)
-        return "", ""
+        return "", "", f"http error: {exc.__class__.__name__}"
     except Exception as exc:  # noqa: BLE001 — never let extraction kill dispatch
         logger.warning("[linkedin] unexpected fetch error for %s: %s", url, exc)
-        return "", ""
-    return _parse_og(body)
+        return "", "", f"unexpected error: {exc.__class__.__name__}"
+
+    if err is not None or resp is None:
+        logger.info("[linkedin] live fetch rejected for %s: %s", url, err)
+        return "", "", err or "no response"
+
+    if resp.status_code >= 400:
+        return "", "", f"status {resp.status_code}"
+
+    # 256 KB cap for parsing is plenty for OG tags. The streamer already
+    # enforced the 5 MB hard ceiling; this just shortens the parse.
+    body = resp.text[: 256 * 1024] if resp.text else ""
+    title, description = _parse_og(body)
+    return title, description, None
 
 
 # --- handler -----------------------------------------------------------------
@@ -218,9 +238,25 @@ class LinkedInHandler:
             )
 
         # Live-fetch fallback. Accepts a degraded extraction silently.
-        title, description = _fetch_og(url)
+        title, description, err = _fetch_og(url)
         if not title:
             title = self._derive_title_from_url(url)
+
+        meta: dict[str, object] = {
+            "linkedin": {"via": "og-fallback", "degraded": not description},
+        }
+        # Surface guard rejections in the note so downstream can audit them.
+        # `ssrf_blocked` is the marker the security test suite asserts on.
+        if err:
+            meta["fetch_error"] = err
+            err_lower = err.lower()
+            if "ssrf" in err_lower:
+                meta["ssrf_blocked"] = True
+            if "exceeded" in err_lower and "bytes" in err_lower:
+                meta["size_cap_exceeded"] = True
+            if "redirect" in err_lower:
+                meta["redirect_cap_exceeded"] = True
+
         return NoteRecord(
             source=str(envelope.source.value),
             handler=self.name,
@@ -228,7 +264,7 @@ class LinkedInHandler:
             title=title,
             text=description,
             captured_at=captured_at,
-            raw_meta={"linkedin": {"via": "og-fallback", "degraded": not description}},
+            raw_meta=meta,
         )
 
     @staticmethod

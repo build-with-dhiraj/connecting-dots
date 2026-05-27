@@ -25,7 +25,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope
+from connecting_dots.inbound_envelope import InboundEnvelope
 from connecting_dots.types import NoteRecord
 
 logger = logging.getLogger(__name__)

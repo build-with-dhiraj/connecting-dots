@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from connecting_dots import dispatcher
-from connecting_dots.generated.inbound_envelope import InboundEnvelope
+from connecting_dots.inbound_envelope import InboundEnvelope
 from connecting_dots.types import NoteRecord
 
 

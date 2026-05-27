@@ -17,7 +17,7 @@ import pytest
 import respx
 from pydantic import AnyUrl
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, Source
 from connecting_dots.handlers.web import WebHandler
 
 
@@ -227,11 +227,23 @@ def test_handle_degrades_when_redirect_chain_exceeds_cap() -> None:
 
 @respx.mock
 def test_handle_rejects_non_http_scheme_envelope() -> None:
-    """If a `file://` envelope ever reaches the handler (e.g. via misroute),
-    refuse to fetch it. Pydantic AnyUrl tolerates `file://` so the envelope
-    is constructible — the handler must guard at its own boundary.
+    """A `file://` envelope is rejected at the envelope boundary by the
+    `InboundEnvelope` scheme validator (see `tests/test_inbound_envelope_validator.py`).
+    Even if somebody bypasses that wrapper, the handler's own scheme check
+    must still degrade gracefully — that's what this test covers, by
+    constructing the bare generated model and feeding it directly.
     """
-    env = _make_envelope("file:///etc/passwd")
+    from connecting_dots.generated.inbound_envelope import (
+        InboundEnvelope as GeneratedInboundEnvelope,
+    )
+
+    env = GeneratedInboundEnvelope(
+        message_id="web-test-1",
+        url=AnyUrl("file:///etc/passwd"),
+        source=Source.mailto,
+        captured_at=datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc),
+        raw_payload={},
+    )
 
     note = WebHandler().handle(env)
 

@@ -65,7 +65,7 @@ from typing import Any
 from upstash_redis import Redis
 
 from connecting_dots.dispatcher import dispatch_url
-from connecting_dots.generated.inbound_envelope import InboundEnvelope
+from connecting_dots.inbound_envelope import InboundEnvelope
 
 logger = logging.getLogger(__name__)
 

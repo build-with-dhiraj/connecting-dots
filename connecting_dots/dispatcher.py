@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope
+from connecting_dots.inbound_envelope import InboundEnvelope
 from connecting_dots.handlers.base import Handler, HandlerNotFound
 from connecting_dots.types import NoteRecord
 

@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope
+from connecting_dots.inbound_envelope import InboundEnvelope
 
 
 def main(argv: list[str]) -> int:

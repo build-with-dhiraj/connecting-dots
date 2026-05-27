@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from pydantic import AnyUrl
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope, Source
+from connecting_dots.inbound_envelope import InboundEnvelope, Source
 from connecting_dots.handlers import youtube as yt
 from connecting_dots.handlers.youtube import YouTubeHandler, extract_video_id
 

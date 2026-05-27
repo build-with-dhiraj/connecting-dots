@@ -23,17 +23,17 @@ Security posture (mirrors `web.py`):
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
 import re
-import socket
 from typing import Final
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
 
-from connecting_dots.generated.inbound_envelope import InboundEnvelope
+from connecting_dots.inbound_envelope import InboundEnvelope
+from connecting_dots.handlers._safe_fetch import MAX_REDIRECTS as _MAX_REDIRECTS
+from connecting_dots.handlers._safe_fetch import ssrf_check_url as _ssrf_check_url
 from connecting_dots.types import NoteRecord
 
 logger = logging.getLogger(__name__)
@@ -49,50 +49,7 @@ _DESKTOP_UA: Final = (
 )
 _OEMBED_ENDPOINT: Final = "https://api.instagram.com/oembed"
 _HTTP_TIMEOUT_S: Final = 10.0
-_MAX_REDIRECTS: Final = 5
 _ALLOWED_SCHEMES: Final = frozenset({"http", "https"})
-
-
-def _is_blocked_ip(ip_str: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError:
-        return True
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
-def _ssrf_safe_host(host: str) -> bool:
-    if not host:
-        return False
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except (socket.gaierror, UnicodeError, OSError) as exc:
-        logger.info("ssrf guard: dns resolution failed for %s: %s", host, exc)
-        return False
-    if not infos:
-        return False
-    for info in infos:
-        ip = info[4][0]
-        if _is_blocked_ip(ip):
-            logger.warning("ssrf guard: blocked %s -> %s", host, ip)
-            return False
-    return True
-
-
-def _ssrf_check_url(url: str) -> bool:
-    """True iff `url` is http(s), has a host, and the host resolves to a
-    publicly-routable address."""
-    parts = urlparse(url)
-    if parts.scheme not in _ALLOWED_SCHEMES or not parts.hostname:
-        return False
-    return _ssrf_safe_host(parts.hostname)
 
 
 def _strip_tracking(url: str) -> str:
