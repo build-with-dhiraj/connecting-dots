@@ -15,7 +15,6 @@ a tmp dir, so the real vault under `vault/` is never touched.
 """
 from __future__ import annotations
 
-import os
 import re
 import threading
 from datetime import datetime, timezone

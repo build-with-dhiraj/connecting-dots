@@ -11,7 +11,6 @@ Tests must be deterministic and < 1s each.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 from datetime import datetime, timezone

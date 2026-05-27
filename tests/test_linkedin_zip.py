@@ -131,13 +131,13 @@ def test_idempotency_on_reimport(tmp_path: Path) -> None:
     """Reimporting the same export must yield identical message_ids."""
     inbox = tmp_path / "inbox"
     inbox.mkdir()
-    zip1 = _make_export_zip(inbox / "export_a.zip")
+    _make_export_zip(inbox / "export_a.zip")
 
     sink1 = _DispatchSink()
     w.sweep_once(inbox, dispatch=sink1)
 
     # Drop the same payload again — fresh ZIP with the same rows.
-    zip2 = _make_export_zip(inbox / "export_b.zip")
+    _make_export_zip(inbox / "export_b.zip")
     sink2 = _DispatchSink()
     w.sweep_once(inbox, dispatch=sink2)
 
