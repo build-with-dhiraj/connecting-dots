@@ -1,9 +1,11 @@
 """Atomic vault note writer with stable frontmatter serialization.
 
 Day-1 component #10. Owns:
-- Slug derivation from title/url with collision suffixing.
+- Slug derivation from title/url with Unicode-aware normalization.
 - Frontmatter YAML serialization (stable key order for diff hygiene).
-- Atomic write via tempfile + os.replace.
+- Handler-based vault routing (content-type taxonomy, not ingest channel).
+- Atomic write via tempfile + os.rename + parent fsync (POSIX).
+- TOCTOU-safe collision resolution via O_CREAT | O_EXCL.
 - Post-write embedding hook (component #9 — stub).
 
 Out of scope (later components):
@@ -12,69 +14,148 @@ Out of scope (later components):
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
-import re
 import tempfile
-from dataclasses import dataclass
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import yaml
 
 VAULT_ROOT = Path(__file__).resolve().parent.parent.parent / "vault"
 
-# Source -> subdir under vault/sources. Unknown sources land in inbox/.
-_SOURCE_DIRS = {
-    "whatsapp": "sources/whatsapp",
+# Stable frontmatter key order. Anything not in this list is appended alphabetically.
+_FRONTMATTER_ORDER = (
+    "source",
+    "handler",
+    "captured_at",
+    "url",
+    "title",
+    "entities",
+    "topics",
+    "labels",
+    "raw_meta",
+)
+
+# Recognized content-type handlers that route to dedicated source dirs.
+_HANDLER_DIRS = {
     "youtube": "sources/youtube",
     "instagram": "sources/instagram",
     "linkedin": "sources/linkedin",
+    "web": "sources/web",
 }
 
-# Stable frontmatter key order. Anything not in this list is appended alphabetically.
-_FRONTMATTER_ORDER = ("source", "captured_at", "url", "entities", "topics", "labels")
+_FAILED_DIR = "inbox/_failed"
+_INBOX_DIR = "inbox"
+
+_MAX_COLLISION_SUFFIX = 999
+_MAX_SLUG_LEN = 80
 
 
-@dataclass(frozen=True)
-class VaultWriteResult:
-    vault_path: Path           # absolute path on disk
-    relative_path: str         # path relative to vault root (used as LanceDB key)
-    slug: str
-    created: bool              # False if we collided and suffix-bumped
+# --------------------------------------------------------------------------- #
+# Routing
+# --------------------------------------------------------------------------- #
+def _route_subdir(*, source: str, handler: str) -> str:
+    """Return the vault subdirectory (relative to vault root) for a note.
+
+    Routing is driven by `handler` (content type), not `source` (ingest channel)
+    so that a YouTube link arriving via WhatsApp or mailto both land in
+    `sources/youtube/`.
+    """
+    h = (handler or "").lower()
+    if h in _HANDLER_DIRS:
+        return _HANDLER_DIRS[h]
+    if h == "failed":
+        return _FAILED_DIR
+    return _INBOX_DIR
 
 
-def _slugify(text: str, max_len: int = 60) -> str:
-    text = text.strip().lower()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[-\s]+", "-", text).strip("-")
-    return (text or "untitled")[:max_len]
+# --------------------------------------------------------------------------- #
+# Slug derivation — Unicode-aware
+# --------------------------------------------------------------------------- #
+def _slugify(title: str, url: str = "", max_len: int = _MAX_SLUG_LEN) -> str:
+    """Normalize a title into a filesystem-safe slug.
+
+    Accepts non-ASCII scripts (CJK, Arabic, Cyrillic, etc.) by keeping any
+    Unicode `L` (letter) or `N` (number) category char, plus spaces and dashes.
+    Collapses runs of whitespace/dashes. Falls back to a hash-of-url-derived
+    slug when the result is empty, so distinct empty-title items don't collide.
+    """
+    if title is None:
+        title = ""
+    # NFKC keeps CJK as single chars; NFKD splits accents. We want NFKC so
+    # CJK characters survive intact instead of being decomposed into ideographs.
+    normalized = unicodedata.normalize("NFKC", title).strip()
+
+    kept_chars: list[str] = []
+    for ch in normalized:
+        if ch in ("-", " ", "_"):
+            kept_chars.append(" ")
+            continue
+        cat = unicodedata.category(ch)
+        # L* = letters (any script). N* = numbers.
+        if cat.startswith("L") or cat.startswith("N"):
+            kept_chars.append(ch)
+        # Drop everything else (punctuation, symbols, emoji, control).
+
+    slug = "".join(kept_chars).strip()
+    # Collapse internal whitespace runs to a single dash.
+    parts = slug.split()
+    slug = "-".join(parts).lower()
+    slug = slug[:max_len].strip("-")
+
+    if slug:
+        return slug
+
+    # Empty-title fallback: hash the URL so two distinct empty-title notes
+    # don't collide into the same file.
+    seed = (url or title or "").encode("utf-8", errors="ignore")
+    digest = hashlib.sha256(seed).hexdigest()[:8]
+    return f"note-{digest}"
 
 
-def _derive_slug(text: str, url: str | None) -> str:
-    first_line = text.strip().splitlines()[0] if text.strip() else ""
-    # Strip a leading "# " if the caller already wrote a Markdown title.
-    first_line = re.sub(r"^#+\s*", "", first_line)
-    if first_line:
-        return _slugify(first_line)
-    if url:
-        return _slugify(re.sub(r"^https?://", "", url).replace("/", "-"))
-    return "untitled"
+# --------------------------------------------------------------------------- #
+# Collision-safe path resolution (TOCTOU-free via O_CREAT|O_EXCL)
+# --------------------------------------------------------------------------- #
+def _create_exclusive(target_dir: Path, slug: str) -> tuple[Path, int]:
+    """Atomically reserve a path by creating an empty file with O_EXCL.
+
+    Returns (path, fd). Caller must close the fd. Suffix-bumps `-2`, `-3`, ...
+    up to `_MAX_COLLISION_SUFFIX` on `FileExistsError`. This is the only
+    way to win a race between multiple writers / threads / processes
+    attempting the same slug.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    mode = 0o644
+
+    candidates = [f"{slug}.md"] + [
+        f"{slug}-{n}.md" for n in range(2, _MAX_COLLISION_SUFFIX + 1)
+    ]
+    for name in candidates:
+        candidate = target_dir / name
+        try:
+            fd = os.open(str(candidate), flags, mode)
+            return candidate, fd
+        except FileExistsError:
+            continue
+        except OSError as e:
+            # EEXIST on some platforms surfaces as plain OSError.
+            if e.errno == errno.EEXIST:
+                continue
+            raise
+    raise RuntimeError(
+        f"Slug collision overflow after {_MAX_COLLISION_SUFFIX} attempts "
+        f"at {target_dir / slug}.md"
+    )
 
 
-def _resolve_collision(target_dir: Path, slug: str) -> tuple[Path, bool]:
-    """Return (final_path, created_fresh)."""
-    candidate = target_dir / f"{slug}.md"
-    if not candidate.exists():
-        return candidate, True
-    for n in range(2, 1000):
-        candidate = target_dir / f"{slug}-{n}.md"
-        if not candidate.exists():
-            return candidate, False
-    raise RuntimeError(f"Slug collision overflow at {target_dir / slug}")
-
-
+# --------------------------------------------------------------------------- #
+# Frontmatter
+# --------------------------------------------------------------------------- #
 def _ordered_frontmatter(meta: dict[str, Any]) -> dict[str, Any]:
     ordered: dict[str, Any] = {}
     for k in _FRONTMATTER_ORDER:
@@ -93,23 +174,8 @@ def _serialize(meta: dict[str, Any], body: str) -> str:
         allow_unicode=True,
         default_flow_style=False,
     ).rstrip()
-    body = body.rstrip() + "\n"
+    body = (body or "").rstrip() + "\n"
     return f"---\n{fm}\n---\n\n{body}"
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def _normalize_captured_at(value: datetime | str | None) -> str:
@@ -122,47 +188,141 @@ def _normalize_captured_at(value: datetime | str | None) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# --------------------------------------------------------------------------- #
+# Atomic write with parent fsync
+# --------------------------------------------------------------------------- #
+def _fsync_dir(path: Path) -> None:
+    """Best-effort directory fsync for durability after rename. POSIX-only."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except (OSError, AttributeError):
+        # Windows / unsupported FS — silently skip. Data is still on the file
+        # itself via the write-side fsync below.
+        pass
+
+
+def _atomic_write_into_reservation(
+    final_path: Path, reservation_fd: int, content: str
+) -> None:
+    """Write `content` durably to `final_path`.
+
+    `reservation_fd` is the O_EXCL-created empty file at `final_path`. We
+    write the real bytes via a sibling tmpfile + os.rename so a crash mid-write
+    leaves either (a) the empty reservation file (caller can detect & clean up
+    at next boot if desired) or (b) the fully written final, never a partial.
+    """
+    # Drop the reservation fd — we only used it to win the race. The empty
+    # placeholder file remains; the rename below overwrites it atomically.
+    try:
+        os.close(reservation_fd)
+    except OSError:
+        pass
+
+    parent = final_path.parent
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".md", dir=str(parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.rename(tmp, str(final_path))
+    except Exception:
+        # Best-effort cleanup of both tmp and the empty reservation.
+        for p in (tmp, str(final_path)):
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+        raise
+
+    _fsync_dir(parent)
+
+
+# --------------------------------------------------------------------------- #
+# Public API
+# --------------------------------------------------------------------------- #
 def write_note(
     *,
     source: str,
+    handler: str,
+    url: str,
+    title: str,
     text: str,
-    url: str | None = None,
-    entities: Iterable[dict[str, Any]] | None = None,
-    topics: Iterable[str] | None = None,
-    captured_at: datetime | str | None = None,
-    vault_root: Path | None = None,
-) -> VaultWriteResult:
+    captured_at: datetime,
+    entities: list[str] | None = None,
+    topics: list[str] | None = None,
+    raw_meta: dict | None = None,
+) -> Path:
     """Write a single canonical note to the vault.
 
-    Returns a `VaultWriteResult` whose `relative_path` is the stable key used in
-    LanceDB (`items.vault_path`).
+    Routing is driven by `handler` (content-type), not `source` (ingest channel).
+    Frontmatter records both so Obsidian queries can filter by either axis.
+
+    Returns the absolute `Path` to the written note.
+
+    Raises:
+        RuntimeError: if more than 999 slug collisions accumulate.
     """
-    root = vault_root or VAULT_ROOT
-    subdir = _SOURCE_DIRS.get(source, "inbox")
-    target_dir = root / subdir
+    subdir = _route_subdir(source=source, handler=handler)
+    target_dir = _resolve_vault_root() / subdir
 
-    slug = _derive_slug(text, url)
-    final_path, created = _resolve_collision(target_dir, slug)
+    slug = _slugify(title or "", url=url)
+    final_path, fd = _create_exclusive(target_dir, slug)
+    fd_closed = False
 
-    meta: dict[str, Any] = {
-        "source": source,
-        "captured_at": _normalize_captured_at(captured_at),
-        "url": url or "",
-        "entities": list(entities or []),
-        "topics": list(topics or []),
-        "labels": [],
-    }
-    _atomic_write(final_path, _serialize(meta, text))
+    try:
+        meta: dict[str, Any] = {
+            "source": source,
+            "handler": handler,
+            "captured_at": _normalize_captured_at(captured_at),
+            "url": url or "",
+            "title": title or "",
+            "entities": list(entities or []),
+            "topics": list(topics or []),
+            "labels": [],
+        }
+        if raw_meta:
+            meta["raw_meta"] = raw_meta
 
-    rel = final_path.relative_to(root).as_posix()
-    _embed_on_write_stub(rel, text, meta)
+        body = _compose_body(title, text)
+        serialized = _serialize(meta, body)
+        _atomic_write_into_reservation(final_path, fd, serialized)
+        fd_closed = True  # ownership transferred to the helper
 
-    return VaultWriteResult(
-        vault_path=final_path,
-        relative_path=rel,
-        slug=final_path.stem,
-        created=created,
-    )
+        rel = final_path.relative_to(_resolve_vault_root()).as_posix()
+        _embed_on_write_stub(rel, body, meta)
+        return final_path
+    except BaseException:
+        # Clean up the empty reservation + any tmp sibling so a crash mid-write
+        # never leaves an empty .md or .tmp- file behind.
+        if not fd_closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(str(final_path))
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _compose_body(title: str, text: str) -> str:
+    """Prepend an H1 only if the body doesn't already start with one."""
+    t = (title or "").strip()
+    body = (text or "").lstrip()
+    if not t:
+        return body
+    if body.startswith("# "):
+        return body
+    return f"# {t}\n\n{body}" if body else f"# {t}\n"
 
 
 def stable_id(relative_path: str) -> str:
@@ -171,21 +331,27 @@ def stable_id(relative_path: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Vault root indirection (allows env override + per-test isolation)
+# --------------------------------------------------------------------------- #
+def _resolve_vault_root() -> Path:
+    """Return the active vault root.
+
+    Honors `CONNECTING_DOTS_VAULT_ROOT` env var so tests (and per-user
+    deployments) can redirect without monkeypatching module state.
+    """
+    env = os.environ.get("CONNECTING_DOTS_VAULT_ROOT")
+    if env:
+        return Path(env)
+    return VAULT_ROOT
+
+
+# --------------------------------------------------------------------------- #
 # Embedding-on-write — STUB (component #9)
 # --------------------------------------------------------------------------- #
-def _embed_on_write_stub(relative_path: str, text: str, meta: dict[str, Any]) -> None:
+def _embed_on_write_stub(
+    relative_path: str, text: str, meta: dict[str, Any]
+) -> None:
     """TODO(component #9): embed `text`, upsert into LanceDB `items` table.
-
-    Planned wiring:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("BAAI/bge-small-en-v1.5")
-        vec = model.encode(text, normalize_embeddings=True)
-        tbl = lancedb.connect("vault/.lancedb").open_table("items")
-        tbl.merge_insert("id").when_matched_update_all().when_not_matched_insert_all().execute([
-            {"id": stable_id(relative_path), "vector": vec, "text": text,
-             "source": meta["source"], "captured_at": meta["captured_at"],
-             "url": meta["url"], "vault_path": relative_path}
-        ])
 
     Intentionally a no-op on Day 1 so the writer is unit-testable without the
     embedding model on disk.
