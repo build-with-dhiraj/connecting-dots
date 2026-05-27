@@ -14,7 +14,7 @@ export interface InboundEnvelope {
    */
   message_id: string;
   /**
-   * The captured URL to dispatch. Channel-specific extraction has already happened upstream.
+   * The captured URL to dispatch. Channel-specific extraction has already happened upstream. Scheme MUST be http or https — other URI types (file://, mailto:, ftp://, javascript:, data:) are rejected at the boundary so the fetch handlers cannot be coerced into reading local files or non-network resources.
    */
   url: string;
   /**

@@ -41,11 +41,29 @@ def _make_envelope(url: str) -> InboundEnvelope:
         "https://news.ycombinator.com/item?id=1",
         "https://random-blog.dev/2026/post.html",
         "https://www.instagram.com/p/ABC/",  # web is the fallback — yes, even IG
-        "anything-goes",
+        "http://plain-http.example.com/post",
     ],
 )
-def test_matches_always_true(url: str) -> None:
+def test_matches_accepts_http_and_https(url: str) -> None:
     assert WebHandler().matches(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "mailto:hi@example.com",
+        "ftp://example.com/file",
+        "javascript:alert(1)",
+        "data:text/html,<script>",
+        "file:///etc/passwd",
+        "anything-goes",
+        "",
+        "https://",  # no host
+    ],
+)
+def test_matches_rejects_non_http_or_hostless(url: str) -> None:
+    """Scheme allowlist — only http(s) URLs with a host reach the fetcher."""
+    assert WebHandler().matches(url) is False
 
 
 # ---------- handle() — happy paths ----------
@@ -160,6 +178,79 @@ def test_handle_pdf_url_degrades_to_filename_without_fetching() -> None:
     assert note.text == ""
     assert note.raw_meta["extraction_failed"] is True
     assert "pdf" in note.raw_meta["reason"].lower()
+
+
+# ---------- new security / robustness coverage ----------
+
+
+@respx.mock
+def test_handle_degrades_on_5xx() -> None:
+    """Upstream server errors should produce a degraded record, not raise."""
+    url = "https://example.com/oops"
+    respx.get(url).mock(return_value=httpx.Response(503, text="<html>down</html>"))
+
+    note = WebHandler().handle(_make_envelope(url))
+
+    assert note.raw_meta["extraction_failed"] is True
+    assert "503" in note.raw_meta["reason"]
+
+
+@respx.mock
+def test_handle_degrades_on_non_html_content_type() -> None:
+    """A 200 OK with image/jpeg content-type must NOT be fed to BeautifulSoup."""
+    url = "https://example.com/photo"
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "image/jpeg"}, content=b"\xff\xd8\xff\xe0binary",
+        )
+    )
+
+    note = WebHandler().handle(_make_envelope(url))
+
+    assert note.raw_meta["extraction_failed"] is True
+    assert "image/jpeg" in note.raw_meta["reason"]
+
+
+@respx.mock
+def test_handle_degrades_when_redirect_chain_exceeds_cap() -> None:
+    """More than 5 redirects → degraded record, no infinite loop."""
+    for i in range(8):
+        respx.get(f"https://example.com/r{i}").mock(
+            return_value=httpx.Response(301, headers={"Location": f"https://example.com/r{i + 1}"})
+        )
+
+    note = WebHandler().handle(_make_envelope("https://example.com/r0"))
+
+    assert note.raw_meta["extraction_failed"] is True
+    assert "redirects" in note.raw_meta["reason"]
+
+
+@respx.mock
+def test_handle_rejects_non_http_scheme_envelope() -> None:
+    """If a `file://` envelope ever reaches the handler (e.g. via misroute),
+    refuse to fetch it. Pydantic AnyUrl tolerates `file://` so the envelope
+    is constructible — the handler must guard at its own boundary.
+    """
+    env = _make_envelope("file:///etc/passwd")
+
+    note = WebHandler().handle(env)
+
+    assert note.raw_meta["extraction_failed"] is True
+    assert "scheme" in note.raw_meta["reason"]
+
+
+def test_handle_ssrf_blocks_loopback_host() -> None:
+    """A URL resolving to 127.0.0.1 must be rejected without a fetch.
+
+    `localhost` resolves to a loopback address on every reasonable host —
+    we rely on `socket.getaddrinfo` returning a blocked range.
+    """
+    env = _make_envelope("http://localhost/internal")
+
+    note = WebHandler().handle(env)
+
+    assert note.raw_meta["extraction_failed"] is True
+    assert "ssrf" in note.raw_meta["reason"].lower()
 
 
 @respx.mock

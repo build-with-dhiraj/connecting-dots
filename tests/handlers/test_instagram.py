@@ -167,7 +167,11 @@ def test_handle_strips_tracking_params_before_save() -> None:
 
 @respx.mock
 def test_handle_degrades_when_og_tags_missing() -> None:
-    """OG scrape returns 200 but the page has no og:* metadata — degrade gracefully."""
+    """OG scrape returns 200 but the page has no og:* metadata — degrade gracefully.
+
+    Tightened: locks down the full degraded-record contract so future
+    regressions in the failed-record shape are caught.
+    """
     url = "https://www.instagram.com/p/empty/"
     respx.get("https://api.instagram.com/oembed").mock(
         return_value=httpx.Response(401)
@@ -176,4 +180,46 @@ def test_handle_degrades_when_og_tags_missing() -> None:
 
     note = InstagramHandler().handle(_make_envelope(url))
 
+    assert note.handler == "instagram"
+    assert note.url == url
+    assert note.title == url, "degraded title falls back to the cleaned URL"
+    assert note.text == "", "degraded record has empty text body"
     assert note.raw_meta["extraction_failed"] is True
+    assert note.raw_meta["reason"] == (
+        "instagram anonymous block — neither oembed nor og scrape returned usable data"
+    )
+    assert note.raw_meta["original_url"] == url
+    # Should NOT carry an `extractor` key (only success paths do).
+    assert "extractor" not in note.raw_meta
+
+
+# ---------- new security / robustness coverage ----------
+
+
+def test_ssrf_check_blocks_internal_and_bad_schemes() -> None:
+    """The internal SSRF helper rejects loopback, RFC1918, cloud-metadata,
+    link-local, and non-http schemes — exercised directly so we don't
+    need to coerce the handler into using a non-IG host."""
+    from connecting_dots.handlers.instagram import _ssrf_check_url
+
+    assert _ssrf_check_url("http://127.0.0.1/x") is False
+    assert _ssrf_check_url("http://169.254.169.254/latest/meta-data/") is False
+    assert _ssrf_check_url("http://10.0.0.1/x") is False
+    assert _ssrf_check_url("http://192.168.1.1/x") is False
+    assert _ssrf_check_url("http://172.16.0.1/x") is False
+    assert _ssrf_check_url("file:///etc/passwd") is False
+    assert _ssrf_check_url("javascript:alert(1)") is False
+    assert _ssrf_check_url("https://") is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "mailto:a@b.com",
+        "ftp://www.instagram.com/p/ABC/",
+    ],
+)
+def test_matches_rejects_non_http_schemes(url: str) -> None:
+    assert InstagramHandler().matches(url) is False

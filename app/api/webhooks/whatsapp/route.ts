@@ -2,7 +2,10 @@
  * Meta WhatsApp Cloud API webhook.
  *
  * GET  -> verify-token handshake (Meta calls this once when you register the URL).
- * POST -> inbound message + status events. We HMAC-validate, extract messages, dispatch.
+ *         The compare is constant-time so a network attacker cannot probe the
+ *         token byte-by-byte via response-timing differences.
+ * POST -> inbound message + status events. We HMAC-validate (constant-time
+ *         in `verifyMetaSignature`), extract messages, dispatch.
  *
  * Notes:
  * - Runs on Node.js runtime (need crypto + fs).
@@ -10,6 +13,7 @@
  * - Always respond 200 quickly. Meta retries on non-2xx and can disable the webhook on
  *   sustained failures. Heavy work belongs in component #2 (queue/dispatcher).
  */
+import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { verifyMetaSignature } from "@/lib/wa-signature";
 import {
@@ -21,6 +25,22 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * Constant-time string compare. Short-circuits on length mismatch (which is
+ * already a leak-safe early return — length is not the secret), then uses
+ * `crypto.timingSafeEqual` over equal-length byte buffers.
+ */
+function constantTimeEqual(received: string, expected: string): boolean {
+  if (received.length !== expected.length) return false;
+  const a = Buffer.from(received);
+  const b = Buffer.from(expected);
+  try {
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const mode = url.searchParams.get("hub.mode");
@@ -28,9 +48,17 @@ export async function GET(req: NextRequest) {
   const challenge = url.searchParams.get("hub.challenge");
 
   const expected = process.env.WA_VERIFY_TOKEN;
-  if (mode === "subscribe" && token && expected && token === expected) {
+  if (
+    mode === "subscribe" &&
+    token &&
+    expected &&
+    constantTimeEqual(token, expected)
+  ) {
     // Meta requires the raw challenge string echoed back, 200 OK, text/plain.
-    return new NextResponse(challenge ?? "", { status: 200, headers: { "content-type": "text/plain" } });
+    return new NextResponse(challenge ?? "", {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    });
   }
   return new NextResponse("forbidden", { status: 403 });
 }
