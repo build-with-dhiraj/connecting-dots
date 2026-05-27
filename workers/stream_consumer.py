@@ -192,11 +192,15 @@ def _process_entry(
         return
 
     try:
+        # NB: we already claimed `message_id` in the shared dedupe table above,
+        # so we deliberately pass `message_id=None` here — otherwise the
+        # dispatcher would see its own claim and no-op.
         dispatch_url(
             url=str(env.url),
             source=env.source.value,  # StrEnum -> str literal
             captured_at=env.captured_at,
             raw_payload=env.raw_payload,
+            message_id=None,
         )
         logger.info("[stream] dispatched message_id=%s url=%s source=%s",
                     env.message_id, env.url, env.source.value)

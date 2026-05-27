@@ -154,8 +154,73 @@ dispatch_url(
     source="mailto",                  # Literal["whatsapp","mailto","linkedin","manual"]
     captured_at=datetime.now(timezone.utc),
     raw_payload={...},                # channel-specific provenance
+    message_id="mailto:<imap-uid>",   # optional; enables dedupe via data/dedupe.db
 )
 ```
 
-Component #2 calls `register_dispatcher(real_impl)` at startup to replace the
-in-memory mock dispatcher with the real router.
+The dispatcher routes the URL to the first matching handler in
+`connecting_dots/handlers/` (specific → generic, with `web` as the catch-all
+fallback), then writes the resulting `NoteRecord` to the vault via
+`lib.vault_writer.write_note`. Handler exceptions are caught and converted
+into a degraded `NoteRecord(handler="failed", text="")` so a capture is
+never silently lost.
+
+## Adding a new handler
+
+Handlers live in `connecting_dots/handlers/` and satisfy the `Handler`
+Protocol from `connecting_dots/handlers/base.py`:
+
+```python
+# connecting_dots/handlers/reddit.py
+from connecting_dots.generated.inbound_envelope import InboundEnvelope
+from connecting_dots.types import NoteRecord
+
+
+class RedditHandler:
+    name = "reddit"
+
+    def matches(self, url: str) -> bool:
+        return "reddit.com" in url or "redd.it" in url
+
+    def handle(self, envelope: InboundEnvelope) -> NoteRecord:
+        # ... extract post body, comments, etc. ...
+        return NoteRecord(
+            source=envelope.source.value,
+            handler=self.name,
+            url=str(envelope.url),
+            title="...",
+            text="...",
+            captured_at=envelope.captured_at,
+            raw_meta={"subreddit": "..."},
+        )
+
+
+handler = RedditHandler()  # module-level singleton resolved by the dispatcher
+```
+
+Then register the module in `HANDLER_MODULES` in
+`connecting_dots/dispatcher.py` — **specific handlers go before the `web`
+fallback**:
+
+```python
+HANDLER_MODULES = [
+    "connecting_dots.handlers.youtube",
+    "connecting_dots.handlers.reddit",       # <-- new
+    "connecting_dots.handlers.instagram",
+    "connecting_dots.handlers.linkedin",
+    "connecting_dots.handlers.web",          # MUST stay last
+]
+```
+
+The resolver accepts three export conventions for backwards-compat:
+`mod.handler`, `mod.{stem}_handler` (e.g. `youtube_handler`), or a class
+named `{Stem}Handler` that it will instantiate.
+
+### Tests
+
+```bash
+.venv/bin/python -m pytest tests/test_dispatcher.py -v
+```
+
+Test fixtures use `dispatcher.set_handlers([...])` with mock handler objects,
+so they don't depend on real handler modules being present.

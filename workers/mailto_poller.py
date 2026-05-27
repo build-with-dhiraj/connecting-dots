@@ -147,8 +147,13 @@ def poll_once() -> int:
                 logger.info("UID %s: no URL found; skipping (leaving unread)", uid.decode())
                 continue
             captured_at = datetime.now(timezone.utc)
+            rfc822_msg_id = str(msg.get("Message-ID", "")).strip()
+            # Prefer the RFC-822 Message-ID; fall back to a synthetic id keyed
+            # on the IMAP UID + label so dedupe works even when Message-ID is
+            # missing/duplicated by upstream forwarders.
+            message_id = rfc822_msg_id or f"mailto:{label}:{uid.decode()}"
             raw_payload = {
-                "message_id": str(msg.get("Message-ID", "")),
+                "message_id": rfc822_msg_id,
                 "from": str(msg.get("From", "")),
                 "to": str(msg.get("To", "")),
                 "subject": subject,
@@ -157,7 +162,13 @@ def poll_once() -> int:
                 "imap_label": label,
             }
             try:
-                dispatch_url(url=url, source="mailto", captured_at=captured_at, raw_payload=raw_payload)
+                dispatch_url(
+                    url=url,
+                    source="mailto",
+                    captured_at=captured_at,
+                    raw_payload=raw_payload,
+                    message_id=message_id,
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("Dispatch failed for UID %s; leaving unread for retry", uid.decode())
                 continue
