@@ -16,3 +16,4 @@ tsconfig.tsbuildinfo
 *.egg-info/
 # Next.js generated env types
 next-env.d.ts
+.vercel
