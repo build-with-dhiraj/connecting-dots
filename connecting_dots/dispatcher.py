@@ -28,11 +28,13 @@ Day-1 stub is gone — this module IS the dispatcher.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import logging
 import os
 import sqlite3
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,9 +183,23 @@ def reset_handlers() -> None:
 # Dedupe — shares the SQLite table with workers.stream_consumer
 # --------------------------------------------------------------------------- #
 def _open_dedupe(db_path: Path | None = None) -> sqlite3.Connection:
+    """Open the dedupe SQLite DB in WAL mode for concurrent writes.
+
+    P1-WAL: three processes (the WhatsApp stream consumer, the mailto poller,
+    and the LinkedIn ZIP watcher) all INSERT into `seen_message_ids`. Without
+    WAL, SQLite serializes via the rollback journal and concurrent writers
+    raise `database is locked`. WAL + `busy_timeout` lets concurrent readers
+    coexist with a single writer, and the timeout absorbs short write
+    contention. `synchronous=NORMAL` keeps fsync cost low while remaining
+    crash-safe (a power-loss may lose the most recent transaction, which for
+    a dedupe table just means one duplicate is re-dispatched — acceptable).
+    """
     path = db_path or _DEDUPE_DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), isolation_level=None)  # autocommit
+    conn = sqlite3.connect(str(path), isolation_level=None, timeout=5.0)  # autocommit
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS seen_message_ids (
@@ -196,15 +212,29 @@ def _open_dedupe(db_path: Path | None = None) -> sqlite3.Connection:
 
 
 def _claim_message_id(conn: sqlite3.Connection, message_id: str) -> bool:
-    """Atomically mark `message_id` as seen. Returns True on first claim."""
-    try:
-        conn.execute(
-            "INSERT INTO seen_message_ids (message_id, seen_at) VALUES (?, ?)",
-            (message_id, datetime.now(timezone.utc).isoformat()),
-        )
-        return True
-    except sqlite3.IntegrityError:
-        return False
+    """Atomically mark `message_id` as seen. Returns True on first claim.
+
+    P1-WAL: retry up to 3 times with 100 ms backoff on `OperationalError`
+    (database locked) — WAL + busy_timeout should absorb most contention but
+    a hot loop across three processes can still race past the 5 s timeout.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            conn.execute(
+                "INSERT INTO seen_message_ids (message_id, seen_at) VALUES (?, ?)",
+                (message_id, datetime.now(timezone.utc).isoformat()),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            time.sleep(0.1 * (attempt + 1))
+    logger.error("[dispatch] dedupe insert failed after retries: %s", last_exc)
+    raise last_exc  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- #
@@ -245,19 +275,44 @@ def _write_record(record: NoteRecord) -> None:
 
     Imported lazily so a vault-writer import error doesn't kill module load
     (and so tests can monkeypatch the symbol on this module).
+
+    P0-4: previously this stripped `record.raw_meta` and `record.title` and
+    `record.handler`. For degraded (handler="failed") records that meant the
+    error string never made it into the vault note — the user saw an empty
+    placeholder with no way to recover. We now pass them through.
+
+    Coordinated contract with the vault-writer agent: `write_note` is being
+    extended to accept `title`, `handler`, and `raw_meta` kwargs (final
+    signature in the brief). We pass them by name; if the kwarg isn't yet
+    supported the call will raise `TypeError` and surface in the dispatcher
+    error log — the vault agent's commit will fix it. We do NOT silently
+    swallow.
     """
     # local import: keeps the dispatcher importable when running unit tests that
     # don't have PyYAML installed yet, and lets tests monkeypatch easily.
     from lib.vault_writer import write_note
 
-    write_note(
-        source=record.source,
-        text=_compose_body(record),
-        url=record.url,
-        entities=record.entities,
-        topics=record.topics,
-        captured_at=record.captured_at,
-    )
+    kwargs: dict[str, Any] = {
+        "source": record.source,
+        "text": _compose_body(record),
+        "url": record.url,
+        "entities": record.entities,
+        "topics": record.topics,
+        "captured_at": record.captured_at,
+        # P0-4 contract change with vault_writer agent.
+        "title": record.title,
+        "raw_meta": record.raw_meta,
+    }
+    # The brief's final signature includes `handler` too — pass it if the
+    # vault-writer commit has landed; otherwise fall back gracefully.
+    # TODO(vault-writer-agent): drop the `try/except` once `handler` is in
+    # the canonical signature.
+    try:
+        write_note(handler=record.handler, **kwargs)
+    except TypeError as exc:
+        if "handler" not in str(exc):
+            raise
+        write_note(**kwargs)
 
 
 def _compose_body(record: NoteRecord) -> str:
@@ -347,9 +402,15 @@ def _build_envelope(
 ) -> InboundEnvelope:
     """Construct a validated `InboundEnvelope`. Pydantic enforces the schema
     contract before any handler runs."""
-    # message_id is required on the envelope; synthesize a deterministic-ish
-    # one for sources that didn't supply one (e.g. mailto with no Message-ID).
-    mid = message_id or f"{source}:{int(captured_at.timestamp() * 1000)}:{hash(url) & 0xFFFFFFFF:x}"
+    # message_id is required on the envelope; synthesize a deterministic one
+    # for sources that didn't supply one (e.g. mailto with no Message-ID).
+    #
+    # P1-hash: Python's builtin `hash()` is salted per-process (PYTHONHASHSEED
+    # randomization), so the same (source, url, captured_at) tuple produced
+    # different message_ids across restarts — defeating dedupe across worker
+    # crashes. sha256 is deterministic across processes.
+    url_digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    mid = message_id or f"{source}:{int(captured_at.timestamp() * 1000)}:{url_digest}"
     ts = captured_at if captured_at.tzinfo else captured_at.replace(tzinfo=timezone.utc)
     return InboundEnvelope.model_validate(
         {

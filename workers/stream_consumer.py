@@ -5,17 +5,38 @@ Reads `InboundEnvelope` records from the `inbound-stream` Upstash Redis Stream
 `message_id` against a local SQLite table, and calls
 `connecting_dots.dispatcher.dispatch_url` for each new URL.
 
-Design notes:
+Delivery semantics
+------------------
+At-least-once *with* a dead-letter queue:
+
+1. The offset is only advanced AFTER each entry in the batch is processed.
+2. Successful dispatch -> dedupe row inserted, offset advances.
+3. Dedupe hit (replay) -> logged, offset advances.
+4. Dispatch raises -> raw Redis entry appended to `data/dlq.jsonl`
+   (one JSON object per line: `{stream_id, envelope, error, timestamp}`)
+   BEFORE the offset advances, so a crash mid-DLQ-write doesn't lose
+   the failure. The offset then advances so we don't busy-loop on
+   poison messages. P1-DLQ.
+5. Worker crash before offset write -> next start replays the batch from
+   the prior checkpoint; dedupe absorbs the successful entries and the
+   poison entries hit the DLQ again (idempotent re-failure).
+
+DLQ entries are NEVER auto-retried. A human (or a scheduled re-dispatch
+job) should inspect `data/dlq.jsonl` and decide.
+
+Other design notes
+------------------
 - Upstash REST API + the official `upstash-redis` Python client. We use the
   blocking `XREAD` with a 5-second timeout so SIGTERM is honoured promptly.
 - Last-read stream ID is checkpointed atomically to `data/stream_offset.txt`
-  so the worker is resumable across restarts. At-least-once semantics: the
-  offset is only advanced AFTER `dispatch_url` returns for the batch, and
-  dedup ensures replays don't double-dispatch.
+  so the worker is resumable across restarts.
 - Idempotency is keyed on `envelope.message_id` (WhatsApp `messages[].id` for
   WA traffic; synthetic ids for non-WA sources).
 - The mailto poller intentionally bypasses this stream — it calls
   `dispatch_url` in-process. The stream is the *cross-language* bridge only.
+- The dedupe SQLite DB is opened in WAL mode with `busy_timeout=5000` so the
+  consumer can coexist with the mailto poller and LinkedIn watcher (all three
+  share `data/dedupe.db`). P1-WAL.
 
 Env vars:
     UPSTASH_REDIS_REST_URL       Upstash REST endpoint
@@ -36,6 +57,7 @@ import signal
 import sqlite3
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,6 +74,7 @@ BLOCK_MS = int(os.environ.get("STREAM_BLOCK_MS", "5000"))
 BATCH_COUNT = int(os.environ.get("STREAM_BATCH_COUNT", "32"))
 OFFSET_FILE = Path(os.environ.get("STREAM_OFFSET_FILE", "data/stream_offset.txt"))
 DEDUPE_DB = Path(os.environ.get("DEDUPE_DB_PATH", "data/dedupe.db"))
+DLQ_FILE = Path(os.environ.get("STREAM_DLQ_FILE", "data/dlq.jsonl"))
 
 _DEFAULT_START_ID = "0-0"  # read from the beginning on first launch
 
@@ -71,12 +94,20 @@ def _install_signal_handlers() -> None:
 # --- offset checkpoint -------------------------------------------------------
 
 def _read_offset() -> str:
+    """Load the last-acked stream offset.
+
+    P1-corruption: a partial write or filesystem corruption can leave the
+    offset file with non-UTF8 bytes or a wholly invalid value. We swallow
+    `OSError`, `UnicodeDecodeError`, and `ValueError` and restart from
+    `_DEFAULT_START_ID`. Worst case we re-process the entire stream once;
+    dedupe absorbs the replays.
+    """
     if not OFFSET_FILE.exists():
         return _DEFAULT_START_ID
     try:
         val = OFFSET_FILE.read_text(encoding="utf-8").strip()
         return val or _DEFAULT_START_ID
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         logger.warning("could not read offset file (%s) — starting from %s", exc, _DEFAULT_START_ID)
         return _DEFAULT_START_ID
 
@@ -102,8 +133,17 @@ def _write_offset(stream_id: str) -> None:
 # --- dedupe ------------------------------------------------------------------
 
 def _open_dedupe_db() -> sqlite3.Connection:
+    """Open `data/dedupe.db` in WAL mode (P1-WAL).
+
+    The dispatcher, mailto poller, and (future) LinkedIn watcher all share
+    this DB. WAL + `busy_timeout=5000` lets concurrent writers coexist
+    without `database is locked` errors.
+    """
     DEDUPE_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DEDUPE_DB), isolation_level=None)  # autocommit
+    conn = sqlite3.connect(str(DEDUPE_DB), isolation_level=None, timeout=5.0)  # autocommit
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS seen_message_ids (
@@ -116,15 +156,58 @@ def _open_dedupe_db() -> sqlite3.Connection:
 
 
 def _mark_seen(conn: sqlite3.Connection, message_id: str) -> bool:
-    """Returns True if newly inserted (i.e. not a duplicate)."""
+    """Returns True if newly inserted (i.e. not a duplicate).
+
+    P1-WAL: retry up to 3 times with 100 ms backoff on transient
+    `OperationalError` (database locked / busy). Re-raises persistent
+    failures so the caller can DLQ the entry rather than silently dropping.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            conn.execute(
+                "INSERT INTO seen_message_ids (message_id, seen_at) VALUES (?, ?)",
+                (message_id, datetime.now(timezone.utc).isoformat()),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+    logger.error("[stream] dedupe insert failed after retries: %s", last_exc)
+    raise last_exc  # type: ignore[misc]
+
+
+# --- DLQ ---------------------------------------------------------------------
+
+def _append_dlq(stream_id: str, fields: dict[str, str], error: str) -> None:
+    """Append a poison-message entry to `data/dlq.jsonl` (P1-DLQ).
+
+    Called when `dispatch_url` raises. We write the raw stream fields (NOT
+    just the parsed envelope) so a human can inspect even invalid payloads.
+    The append is fsync'd because the offset advance immediately follows;
+    we don't want a crash window where the offset moves past a failed
+    entry that wasn't durably captured.
+    """
+    DLQ_FILE.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "stream_id": stream_id,
+        "envelope": fields,
+        "error": error,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    # Open with O_APPEND so concurrent writers (if any) interleave cleanly.
+    fd = os.open(str(DLQ_FILE), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        conn.execute(
-            "INSERT INTO seen_message_ids (message_id, seen_at) VALUES (?, ?)",
-            (message_id, datetime.now(timezone.utc).isoformat()),
-        )
-        return True
-    except sqlite3.IntegrityError:
-        return False
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 # --- consumer ----------------------------------------------------------------

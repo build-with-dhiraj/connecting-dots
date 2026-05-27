@@ -26,8 +26,21 @@ export interface InboundMessageEnvelope {
 }
 
 const STREAM_KEY = "inbound-stream";
-const LOG_DIR = path.resolve(process.cwd(), "logs");
-const FALLBACK_FILE = path.join(LOG_DIR, "inbound-fallback.jsonl");
+
+/**
+ * P0-3: Vercel's serverless filesystem is read-only EXCEPT `/tmp`. Writing the
+ * JSONL fallback under `process.cwd()/logs` raises EROFS at runtime and we
+ * silently lose the message. On Vercel we write to `/tmp` (ephemeral, but at
+ * least the message_id surfaces in `vercel logs`); locally we keep the
+ * repo-rooted path so devs can inspect drops.
+ */
+function _fallbackPaths(): { dir: string; file: string } {
+  if (process.env.VERCEL === "1") {
+    return { dir: "/tmp", file: "/tmp/inbound-fallback.jsonl" };
+  }
+  const dir = path.resolve(process.cwd(), "logs");
+  return { dir, file: path.join(dir, "inbound-fallback.jsonl") };
+}
 
 let _redis: Redis | null | undefined; // undefined = not yet probed; null = unavailable
 
@@ -60,8 +73,26 @@ function validateEnvelope(env: InboundEnvelope): void {
 }
 
 async function appendFallback(env: InboundEnvelope): Promise<void> {
-  await fs.mkdir(LOG_DIR, { recursive: true });
-  await fs.appendFile(FALLBACK_FILE, JSON.stringify(env) + "\n", "utf8");
+  const { dir, file } = _fallbackPaths();
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.appendFile(file, JSON.stringify(env) + "\n", "utf8");
+  } catch (err) {
+    // Last-resort: surface the dropped message_id in the logs so it isn't lost
+    // silently if even /tmp write fails (e.g. permissions, full disk).
+    console.error("[inbound-dispatch] fallback write failed, dropping message", {
+      message_id: env.message_id,
+      err: String(err),
+    });
+    throw err;
+  }
+  if (process.env.VERCEL === "1") {
+    // On Vercel, /tmp is wiped between invocations — also log so the message_id
+    // is retrievable via `vercel logs` even after the file is gone.
+    console.error("[inbound-dispatch] message written to ephemeral /tmp fallback", {
+      message_id: env.message_id,
+    });
+  }
 }
 
 /**
@@ -85,17 +116,41 @@ export async function dispatchInboundMessage(env: InboundEnvelope): Promise<void
   }
 }
 
-const URL_RE = /https?:\/\/[^\s<>"'\])}]+/i;
+/**
+ * P1-URL_RE: require at least one dot in the host portion. The previous regex
+ * `https?:\/\/[^\s<>"'\])}]+` happily matched bare-scheme strings like
+ * `https://` (with nothing after) or `https://foo` (no TLD), which then choke
+ * the pydantic `AnyUrl` validator downstream and surface as a 500 instead of
+ * a clean "no URL" skip.
+ *
+ * We still validate with `new URL()` after the regex match — the dot rule is
+ * cheap pre-filtering; the constructor is the source of truth.
+ */
+const URL_RE = /https?:\/\/[^\s<>"'\])}]*\.[^\s<>"'\])}]+/i;
+
+function _validUrl(candidate: string): string | null {
+  try {
+    return new URL(candidate).toString();
+  } catch {
+    return null;
+  }
+}
 
 function extractUrlFromWaMessage(msg: any): string | null {
   if (msg?.type === "text" && typeof msg?.text?.body === "string") {
     const m = msg.text.body.match(URL_RE);
-    if (m) return m[0];
+    if (m) {
+      const v = _validUrl(m[0]);
+      if (v) return v;
+    }
   }
   try {
     const s = JSON.stringify(msg);
     const m = s.match(URL_RE);
-    if (m) return m[0];
+    if (m) {
+      const v = _validUrl(m[0]);
+      if (v) return v;
+    }
   } catch {
     /* ignore */
   }
@@ -131,9 +186,19 @@ export function extractInboundMessages(payload: any): InboundMessageEnvelope[] {
   return out;
 }
 
-/** Adapt a WhatsApp envelope (legacy shape) to the cross-channel envelope. */
+/**
+ * Adapt a WhatsApp envelope (legacy shape) to the cross-channel envelope.
+ *
+ * P1-AnyUrl: the TS side previously emitted URLs verbatim while the Python
+ * side parses them through `pydantic.AnyUrl`, which normalizes (adds trailing
+ * slash to bare hosts, lowercases scheme, etc.). The drift caused round-trip
+ * mismatches. We pre-normalize via `new URL(url).toString()` so the string
+ * the Python side validates is identical to what we serialized.
+ */
 export function whatsappToEnvelope(m: InboundMessageEnvelope): InboundEnvelope | null {
-  const url = extractUrlFromWaMessage(m.raw);
+  const raw = extractUrlFromWaMessage(m.raw);
+  if (!raw) return null;
+  const url = _validUrl(raw);
   if (!url) return null;
   return {
     message_id: m.messageId,
