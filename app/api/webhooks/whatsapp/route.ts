@@ -12,7 +12,11 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { verifyMetaSignature } from "@/lib/wa-signature";
-import { dispatchInboundMessage, extractInboundMessages } from "@/lib/inbound-dispatch";
+import {
+  dispatchInboundMessage,
+  extractInboundMessages,
+  whatsappToEnvelope,
+} from "@/lib/inbound-dispatch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,13 +61,21 @@ export async function POST(req: NextRequest) {
   const messages = extractInboundMessages(payload);
   console.log("[wa/webhook] received", { messageCount: messages.length, object: payload?.object });
 
-  // Dispatch in parallel but never let a downstream failure cause Meta to retry — log and ack.
+  // Adapt to cross-channel envelope. Messages without URLs are skipped (e.g. media-only).
+  // Dispatch in parallel; downstream failures never bubble — webhook always acks 200.
   await Promise.allSettled(
-    messages.map((m) =>
-      dispatchInboundMessage(m).catch((err) => {
+    messages.map(async (m) => {
+      try {
+        const env = whatsappToEnvelope(m);
+        if (!env) {
+          console.log("[wa/webhook] no url in message — skipping", { messageId: m.messageId });
+          return;
+        }
+        await dispatchInboundMessage(env);
+      } catch (err) {
         console.error("[wa/webhook] dispatch failed", { messageId: m.messageId, err: String(err) });
-      }),
-    ),
+      }
+    }),
   );
 
   return NextResponse.json({ ok: true });

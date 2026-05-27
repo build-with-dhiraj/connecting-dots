@@ -7,11 +7,78 @@ if WhatsApp Meta verification stalls.
 ## Components
 
 - **#1 WhatsApp inbound** — Meta Cloud API webhook (in progress)
+- **#1.5 Cross-language bridge** — Upstash Redis Stream (`inbound-stream`).
+  TS webhook (Vercel) `XADD`s; Python `workers.stream_consumer` `XREAD`s.
 - **#2 URL dispatcher** — channel-agnostic router (`connecting_dots/dispatcher.py`)
 - **#3 YouTube handler** — TBD
 - **#4 Instagram handler** — TBD
 - **#5 Web/PDF handler** — TBD
 - **#6 mailto IMAP fallback** — `workers/mailto_poller.py` (this doc)
+
+## Upstash Redis Stream bridge — setup runbook
+
+The WhatsApp webhook runs on Vercel (TypeScript); the URL pipeline runs on
+your laptop (Python). The bridge is a single Upstash Redis Stream so messages
+accumulate server-side while the laptop sleeps. At-least-once delivery,
+deduped by WhatsApp `messages[].id`.
+
+### 1. Provision the Upstash database
+
+1. Open https://console.upstash.com/redis and sign in.
+2. **Create Database** → name it `connecting-dots-inbound`, region close to
+   Vercel's primary (e.g. `us-east-1`), free tier is fine.
+3. From the database detail page, copy the two values under **REST API**:
+   - `UPSTASH_REDIS_REST_URL` (looks like `https://xxx.upstash.io`)
+   - `UPSTASH_REDIS_REST_TOKEN`
+4. Paste both into your local `.env` (copy from `.env.example`).
+5. Add the same two vars to the Vercel project: **Settings → Environment
+   Variables → Add** for Production and Preview. Redeploy so the webhook
+   picks them up (`vc deploy --prod` or push to main).
+
+### 2. Shared envelope schema
+
+The canonical schema is `schemas/inbound_envelope.schema.json`. Both sides
+generate types from it — never hand-edit the generated files.
+
+```bash
+# TS type (used by lib/inbound-dispatch.ts)
+npm run gen:types
+
+# Python pydantic model (used by workers/stream_consumer.py)
+make gen-types-py
+
+# Both
+make gen-types
+```
+
+Round-trip test (TS emits JSON, Python parses via codegenned model):
+
+```bash
+make test-bridge
+```
+
+### 3. Run the consumer
+
+```bash
+# One-time: create a 3.11+ venv and install Python deps
+uv venv --python 3.11
+uv pip install -e .
+
+# Run the consumer (long-running, SIGTERM-safe, resumable)
+.venv/bin/python -m workers.stream_consumer
+```
+
+The consumer keeps its stream offset at `data/stream_offset.txt` and its
+dedupe table at `data/dedupe.db`. Both are gitignored. Safe to stop/restart
+at any time — at-least-once semantics + dedupe = no double dispatch.
+
+### Why a stream and not a queue/webhook fan-out?
+
+- Laptop can sleep; messages buffer in Upstash (free tier: 10k commands/day).
+- Equal SDK quality on both sides (`@upstash/redis` + `upstash-redis`).
+- Cross-language without HTTP fan-out from Vercel to a home IP.
+- The mailto poller intentionally **bypasses** the stream and calls
+  `dispatch_url` in-process — the stream is the cross-language bridge only.
 
 ## mailto IMAP fallback — setup runbook
 

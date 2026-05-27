@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://connecting-dots.local/schemas/inbound_envelope.json",
+  "title": "InboundEnvelope",
+  "description": "Cross-language envelope appended to the Upstash Redis Stream `inbound-stream`. Produced by ingest channels (Vercel WhatsApp webhook today; future LinkedIn/manual relays). Consumed by the Python `workers.stream_consumer` which calls `connecting_dots.dispatcher.dispatch_url`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message_id", "url", "source", "captured_at", "raw_payload"],
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Idempotency key. For WhatsApp this is `messages[].id` from Meta. For non-WA sources, a synthetic id like `mailto:<imap-uid>` or `linkedin:<urn>`."
+    },
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "description": "The captured URL to dispatch. Channel-specific extraction has already happened upstream."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["whatsapp", "mailto", "linkedin", "manual"],
+      "description": "Origin channel — must match `connecting_dots.dispatcher.SourceChannel`."
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the ingest channel received the message."
+    },
+    "raw_payload": {
+      "type": "object",
+      "description": "Channel-specific provenance blob (e.g. the Meta `messages[i]` object). Opaque to the consumer; forwarded verbatim to `dispatch_url`.",
+      "additionalProperties": true
+    }
+  }
+}

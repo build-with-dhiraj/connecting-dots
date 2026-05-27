@@ -7,16 +7,21 @@ dependencies = [
     # stdlib covers imaplib + email; tldextract is used by downstream URL routing
     # (component #2) but pinned here so the IMAP worker image is self-contained.
     "tldextract>=5.1.2",
+    # Stream bridge consumer (Upstash REST + envelope validation).
+    "upstash-redis>=1.4.0",
+    "pydantic>=2.7",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    "datamodel-code-generator>=0.26",
 ]
 
 [project.scripts]
 mailto-poller = "workers.mailto_poller:run_forever"
+stream-consumer = "workers.stream_consumer:run_forever"
 
 [build-system]
 requires = ["setuptools>=68"]

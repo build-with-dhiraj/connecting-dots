@@ -6,3 +6,9 @@ node_modules/
 *.log
 logs/
 .DS_Store
+.venv/
+__pycache__/
+*.pyc
+# Runtime state for the stream consumer (offset checkpoint + dedupe DB).
+data/
+tsconfig.tsbuildinfo
