@@ -235,7 +235,7 @@ class TestProcessEntry:
             mock_dispatch.assert_not_called()
 
     def test_dispatch_failure_does_not_raise(self, tmp_paths, dedupe_conn):
-        """A failed dispatch is logged but must not propagate — offset still advances."""
+        """A failed dispatch is logged, DLQ'd, but must not propagate — offset still advances."""
         env = _make_envelope(message_id="msg-fail")
         fields = {"envelope": json.dumps(env)}
         with mock.patch.object(
@@ -249,6 +249,15 @@ class TestProcessEntry:
             ("msg-fail",),
         ).fetchone()
         assert row is not None
+        # DLQ entry was durably written before the offset advance (P1-DLQ).
+        assert tmp_paths["dlq"].exists()
+        lines = tmp_paths["dlq"].read_text().strip().splitlines()
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec["stream_id"] == "1-0"
+        assert rec["envelope"] == fields
+        assert "boom" in rec["error"]
+        assert "timestamp" in rec
 
 
 # --------------------------------------------------------------------------- #

@@ -288,10 +288,11 @@ def _process_entry(
         logger.info("[stream] dispatched message_id=%s url=%s source=%s",
                     env.message_id, env.url, env.source.value)
     except Exception as exc:  # noqa: BLE001
-        # At-least-once: log but don't crash the loop. The offset still advances —
-        # dedupe will skip the retry next time, which is the correct behaviour
-        # given dispatch_url is itself responsible for its own durability.
+        # At-least-once with DLQ: log, durably record the poison entry in
+        # data/dlq.jsonl BEFORE the offset advances, then let the loop continue.
+        # Dedupe already claimed message_id above, so we don't retry on replay.
         logger.exception("[stream] dispatch_url failed for %s: %s", env.message_id, exc)
+        _append_dlq(stream_id, fields, str(exc))
 
 
 def run_once(redis: Redis, dedupe: sqlite3.Connection) -> str:
