@@ -1,0 +1,26 @@
+[project]
+name = "connecting-dots"
+version = "0.1.0"
+description = "Multi-channel URL capture pipeline (WhatsApp + mailto IMAP + future channels)."
+requires-python = ">=3.11"
+dependencies = [
+    # stdlib covers imaplib + email; tldextract is used by downstream URL routing
+    # (component #2) but pinned here so the IMAP worker image is self-contained.
+    "tldextract>=5.1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+mailto-poller = "workers.mailto_poller:run_forever"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["connecting_dots*", "workers*"]
