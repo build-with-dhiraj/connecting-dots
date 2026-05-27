@@ -211,6 +211,105 @@ def test_safe_extract_rejects_traversal(tmp_path: Path) -> None:
     assert n == 0
 
 
+def test_safe_extract_rejects_sibling_directory_bypass(tmp_path: Path) -> None:
+    """The classic `startswith`-on-string bypass: dest=`foo`, entry=`../foo_evil/x`.
+
+    The naive check `str(member).startswith(str(dest))` returns True because
+    `/tmp/.../foo_evil/x` starts with `/tmp/.../foo`. The fixed implementation
+    uses `Path.is_relative_to` which inspects path components, not the prefix.
+    """
+    dest = tmp_path / "dest"
+    # Build a ZIP whose member resolves to a sibling directory of `dest`.
+    zp = tmp_path / "sibling.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("../dest_evil/poison.txt", "nope")
+    with zipfile.ZipFile(zp) as zf:
+        with pytest.raises(RuntimeError, match="unsafe path"):
+            w._safe_extract(zf, dest)
+    assert not (tmp_path / "dest_evil").exists()
+
+
+class _FakeSizeZip:
+    """Wraps a real `ZipFile` so `infolist()` returns members with rewritten
+    `file_size` values. `_safe_extract` only reads metadata + path; it never
+    actually extracts on the bomb path because it raises before that, so we
+    don't need to fake decompression."""
+
+    def __init__(self, zf: zipfile.ZipFile, size_overrides: dict[str, int]) -> None:
+        self._zf = zf
+        self._overrides = size_overrides
+
+    def infolist(self) -> list[zipfile.ZipInfo]:
+        out: list[zipfile.ZipInfo] = []
+        for info in self._zf.infolist():
+            if info.filename in self._overrides:
+                # Rewrite in place — these ZipInfo objects are throw-away.
+                info.file_size = self._overrides[info.filename]
+            out.append(info)
+        return out
+
+    def extractall(self, *args, **kwargs):  # pragma: no cover — never reached
+        raise AssertionError("extractall should not be called once caps trip")
+
+
+def test_safe_extract_rejects_oversized_member(tmp_path: Path) -> None:
+    """Single-member uncompressed-size cap (100 MB) must be enforced.
+
+    We can't actually write 200 MB into the ZIP — instead we overwrite the
+    in-memory `file_size` after read to simulate a header that lies about
+    the decompressed size (the classic zip-bomb trick)."""
+    zp = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("huge.bin", b"x")
+    with zipfile.ZipFile(zp) as zf:
+        fake = _FakeSizeZip(zf, {"huge.bin": 200 * 1024 * 1024})
+        with pytest.raises(RuntimeError, match="per-file size cap"):
+            w._safe_extract(fake, tmp_path / "out")  # type: ignore[arg-type]
+
+
+def test_safe_extract_rejects_oversized_total(tmp_path: Path) -> None:
+    """Total uncompressed-size cap (500 MB) must trip even on many small lies."""
+    zp = tmp_path / "bomb_total.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        for i in range(10):
+            zf.writestr(f"chunk_{i}.bin", b"x")
+    overrides = {f"chunk_{i}.bin": 80 * 1024 * 1024 for i in range(10)}
+    with zipfile.ZipFile(zp) as zf:
+        fake = _FakeSizeZip(zf, overrides)
+        with pytest.raises(RuntimeError, match="total uncompressed size cap"):
+            w._safe_extract(fake, tmp_path / "out")  # type: ignore[arg-type]
+
+
+def test_safe_extract_rejects_symlink_member(tmp_path: Path) -> None:
+    """Symlink entries are an extract-time escape hatch; refuse them."""
+    zp = tmp_path / "symlink.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        info = zipfile.ZipInfo("link.txt")
+        # Mark this entry as a Unix symlink (mode 0o120000 in the high half).
+        info.external_attr = 0o120777 << 16
+        zf.writestr(info, "/etc/passwd")
+    with zipfile.ZipFile(zp) as zf:
+        with pytest.raises(RuntimeError, match="symlink"):
+            w._safe_extract(zf, tmp_path / "out")
+
+
+def test_dispatch_receives_message_id_kwarg(tmp_path: Path) -> None:
+    """The synthetic message_id must be passed as an explicit kwarg so the
+    dispatcher dedupes on it (P0-1 regression — without this, re-imports
+    duplicate every row)."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _make_export_zip(inbox / "export.zip")
+    sink = _DispatchSink()
+    w.sweep_once(inbox, dispatch=sink)
+    assert sink.calls, "expected at least one dispatch call"
+    for call in sink.calls:
+        assert "message_id" in call, "dispatch must receive message_id as a kwarg"
+        # And the kwarg must match the payload-embedded id.
+        assert call["message_id"] == call["raw_payload"]["message_id"]
+        assert call["message_id"].startswith("linkedin:")
+
+
 # --------------------------------------------------------------------------- #
 # Handler: contract + export short-circuit
 # --------------------------------------------------------------------------- #
@@ -223,10 +322,28 @@ def test_safe_extract_rejects_traversal(tmp_path: Path) -> None:
         "https://www.linkedin.com/pulse/some-article-jane-doe",
         "https://www.linkedin.com/feed/update/urn:li:activity:9999",
         "https://linkedin.com/in/janedoe/recent-activity/all/",
+        # Locale subdomains — handler must accept any *.linkedin.com host.
+        "https://de.linkedin.com/posts/some-author_activity-1",
+        "https://uk.linkedin.com/pulse/uk-article",
+        "https://fr.linkedin.com/feed/update/urn:li:activity:1",
+        "https://m.linkedin.com/posts/m-author_activity-1",
     ],
 )
 def test_handler_matches_linkedin_urls(url: str) -> None:
     assert LinkedInHandler().matches(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Look-alike host: must NOT be accepted. Suffix is `linkedin.com.evil`,
+        # not `.linkedin.com`, and the apex is `evil`.
+        "https://linkedin.com.evil/posts/abc",
+        "https://notlinkedin.com/posts/abc",
+    ],
+)
+def test_handler_rejects_lookalike_hosts(url: str) -> None:
+    assert not LinkedInHandler().matches(url)
 
 
 @pytest.mark.parametrize(

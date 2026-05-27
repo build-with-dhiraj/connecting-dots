@@ -180,7 +180,10 @@ class LinkedInHandler:
         if parts.scheme not in ("http", "https"):
             return False
         host = _normalize_host(parts.hostname or "")
-        if host != "linkedin.com":
+        # Accept linkedin.com plus locale subdomains (de., uk., fr., …).
+        # `endswith(".linkedin.com")` matches any single- or multi-label
+        # prefix; the apex is checked separately.
+        if not (host == "linkedin.com" or host.endswith(".linkedin.com")):
             return False
         path = parts.path or "/"
         return any(p.search(path) for p in _LINKEDIN_PATH_RES)

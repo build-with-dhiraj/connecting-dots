@@ -204,11 +204,15 @@ class _Row:
 
 
 def _emit(row: _Row, *, dispatch: Callable[..., None]) -> None:
+    # Pass message_id explicitly so the dispatcher's dedupe table uses our
+    # deterministic synthetic id (not a `hash(url)` fallback that would let
+    # re-imports duplicate every row).
     dispatch(
         url=row.url,
         source="linkedin",
         captured_at=row.captured_at,
         raw_payload=row.raw_payload,
+        message_id=row.raw_payload["message_id"],
     )
 
 
@@ -284,15 +288,54 @@ def _iter_reactions(csv_path: Path) -> Iterator[_Row]:
 # --- ZIP processing ----------------------------------------------------------
 
 
+# Zip-bomb caps. LinkedIn's real exports are well under 100 MB even for
+# 10-year accounts; 500 MB total + 100 MB per-member is generous.
+_MAX_TOTAL_UNCOMPRESSED_BYTES = 500 * 1024 * 1024
+_MAX_PER_MEMBER_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+# Unix symlink mode bits live in the high half of `external_attr`.
+_SYMLINK_MODE_BITS = 0o120000 << 16
+
+
 def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
-    """Extract `zf` to `dest`, refusing absolute or traversal paths."""
+    """Extract `zf` to `dest`, refusing unsafe members.
+
+    Refuses:
+    - Path-traversal / absolute paths (zip-slip + sibling-directory bypass:
+      `dest_evil/...` when dest is `dest` used to slip past a `startswith`
+      check on stringified paths).
+    - Symlink entries (LinkedIn exports never use them, and they're a
+      well-known escape hatch around extract-time path checks).
+    - Archives whose declared uncompressed size exceeds our caps (zip-bomb).
+    """
     dest = dest.resolve()
     dest.mkdir(parents=True, exist_ok=True)
+
+    total_size = 0
     for member in zf.infolist():
-        # Reject absolute paths and parent-dir traversal.
+        # Reject symlinks outright.
+        if (member.external_attr & _SYMLINK_MODE_BITS) == _SYMLINK_MODE_BITS:
+            raise RuntimeError(f"symlink entries are not allowed: {member.filename!r}")
+
+        # Zip-bomb caps based on the archive's declared sizes.
+        if member.file_size > _MAX_PER_MEMBER_UNCOMPRESSED_BYTES:
+            raise RuntimeError(
+                f"member exceeds per-file size cap: {member.filename!r} "
+                f"({member.file_size} bytes)"
+            )
+        total_size += member.file_size
+        if total_size > _MAX_TOTAL_UNCOMPRESSED_BYTES:
+            raise RuntimeError(
+                f"archive exceeds total uncompressed size cap "
+                f"({total_size} bytes > {_MAX_TOTAL_UNCOMPRESSED_BYTES})"
+            )
+
+        # Reject absolute paths, parent-dir traversal, and sibling-directory
+        # bypass (`dest_evil/...` when dest is `dest`). `is_relative_to` is
+        # path-aware where `str.startswith` was not.
         member_path = (dest / member.filename).resolve()
-        if not str(member_path).startswith(str(dest)):
+        if not member_path.is_relative_to(dest):
             raise RuntimeError(f"unsafe path in archive: {member.filename!r}")
+
     zf.extractall(dest)
 
 
