@@ -1,5 +1,9 @@
 .PHONY: gen-types gen-types-ts gen-types-py test-bridge
 
+# Python interpreter — prefer the project venv, fall back to system python3.
+# Override on the command line, e.g. `make test-bridge PYTHON=python3.12`.
+PYTHON ?= $(shell if [ -x .venv/bin/python3 ]; then echo .venv/bin/python3; else echo python3; fi)
+
 # Generate Python pydantic model from the shared JSON Schema.
 gen-types-py:
 	datamodel-codegen \
@@ -22,4 +26,4 @@ gen-types: gen-types-ts gen-types-py
 # Round-trip test: TS serializes -> Python parses via codegenned types.
 test-bridge:
 	node scripts/emit_envelope.mjs > /tmp/_envelope.json
-	python -m scripts.parse_envelope /tmp/_envelope.json
+	$(PYTHON) -m scripts.parse_envelope /tmp/_envelope.json

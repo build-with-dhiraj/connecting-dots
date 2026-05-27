@@ -12,3 +12,7 @@ __pycache__/
 # Runtime state for the stream consumer (offset checkpoint + dedupe DB).
 data/
 tsconfig.tsbuildinfo
+# Python build artifacts
+*.egg-info/
+# Next.js generated env types
+next-env.d.ts

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+connecting_dots/
+workers/
+scripts/
+lib/vault_writer/
+tests/
+data/
+vault/
+docs/
+planning/
+.kernel/
+*.db
+*.lance
