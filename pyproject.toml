@@ -31,6 +31,7 @@ dev = [
 [project.scripts]
 mailto-poller = "workers.mailto_poller:run_forever"
 stream-consumer = "workers.stream_consumer:run_forever"
+linkedin-zip-watcher = "workers.linkedin_zip_watcher:run_forever"
 
 [build-system]
 requires = ["setuptools>=68"]

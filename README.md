@@ -14,6 +14,7 @@ if WhatsApp Meta verification stalls.
 - **#4 Instagram handler** — TBD
 - **#5 Web/PDF handler** — TBD
 - **#6 mailto IMAP fallback** — `workers/mailto_poller.py` (this doc)
+- **#7 LinkedIn ZIP watcher** — `workers/linkedin_zip_watcher.py` (this doc)
 
 ## Upstash Redis Stream bridge — setup runbook
 
@@ -224,3 +225,76 @@ named `{Stem}Handler` that it will instantiate.
 
 Test fixtures use `dispatcher.set_handlers([...])` with mock handler objects,
 so they don't depend on real handler modules being present.
+
+## LinkedIn ZIP watcher — setup runbook
+
+LinkedIn does not expose a "saves" API. Instead, request a monthly data
+export from LinkedIn, drop the ZIP into the watched folder, and the worker
+unpacks it and feeds every saved article / reaction into the dispatcher.
+
+### 1. Request the LinkedIn export
+
+1. Open https://www.linkedin.com/mypreferences/d/download-my-data while
+   signed in. (Alternative path: top-right avatar → **Settings & Privacy**
+   → **Data Privacy** → **Get a copy of your data**.)
+2. Choose **Want something in particular?** → check at minimum:
+   - **Saved Articles**
+   - **Reactions**
+   - **Activity** (gives you Shares / Comments — useful for richer signal)
+3. Click **Request archive**. LinkedIn emails the ZIP within ~24h (often
+   minutes for "fast" data sets like saved articles).
+4. Download the `Complete_LinkedInDataExport_*.zip` from the email link.
+
+### 2. Drop the ZIP into the inbox
+
+```bash
+mkdir -p data/linkedin-inbox
+mv ~/Downloads/Complete_LinkedInDataExport_*.zip data/linkedin-inbox/
+```
+
+The watcher will pick it up on the next poll cycle (60s default).
+
+### 3. Run the watcher
+
+One-shot (cron, manual, or first-run sanity check):
+
+```bash
+python -m workers.linkedin_zip_watcher once
+```
+
+Long-running daemon (60s polling, SIGTERM-safe):
+
+```bash
+python -m workers.linkedin_zip_watcher
+# or, after `pip install -e .`:
+linkedin-zip-watcher
+```
+
+### What it does to each ZIP
+
+1. Validates it looks like a LinkedIn export (presence of `Saved Articles.csv`
+   / `Reactions.csv` / `Shares.csv` / etc.).
+2. Extracts to `data/linkedin-inbox/.unpacked/<utc-timestamp>_<zipname>/`.
+3. Parses `Saved Articles.csv` (columns: `SavedAt, ArticleTitle, ArticleURL,
+   ArticleAuthor`) and `Reactions.csv` (columns: `Date, Type, Link`). Headers
+   are matched case- and underscore-insensitively to survive LinkedIn's
+   periodic header drift.
+4. Dispatches each row via the in-process `dispatch_url`. The downstream
+   LinkedIn handler reads `raw_payload.linkedin_export=True` and skips the
+   live fetch entirely — title/author come straight from the CSV row.
+5. Moves the ZIP to `data/linkedin-inbox/.processed/`. Malformed or
+   non-LinkedIn ZIPs are left in place with a warning log so you can inspect.
+
+### Idempotency
+
+`message_id` is `linkedin:<sha256(url|captured_at)>` — deterministic. If you
+re-request the same export window (LinkedIn lets you), the stream
+consumer's `seen_message_ids` SQLite table absorbs the replay. Safe to
+re-import.
+
+### Why polling and not inotify?
+
+macOS FSEvents and Linux inotify both have quirks around files that are
+move-renamed into a directory (atomic vs non-atomic). A 60-second
+`os.scandir` poll is dead-simple, kills no batteries, and a monthly drop
+doesn't need sub-second latency.
