@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "functions": {
+    "app/api/webhooks/whatsapp/route.ts": {
+      "runtime": "nodejs22.x"
+    }
+  }
+}
