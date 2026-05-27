@@ -10,6 +10,9 @@ dependencies = [
     # Stream bridge consumer (Upstash REST + envelope validation).
     "upstash-redis>=1.4.0",
     "pydantic>=2.7",
+    # YouTube handler (#3) — transcript fetch + video metadata.
+    "youtube-transcript-api>=1.0.0",
+    "yt-dlp>=2024.10.0",
 ]
 
 [project.optional-dependencies]
