@@ -300,7 +300,7 @@ Storage / surface / deploy clusters remain gated on **Step 5 (gepetto)** decisio
 **Branches considered:**
 - **SM-2:** proven, simple, low risk, but completely blind to "this saved YT video on RAG eval is suddenly relevant because the user is building a RAG eval today." Misses the project's core value prop.
 - **FSRS:** stronger memory model than SM-2, still blind to current-context relevance.
-- **Hybrid (per `personal-content-resurface/references/algorithms.md`):** score = `w1·recency_decay + w2·forgetting_curve + w3·context_relevance + w4·entity_overlap_with_active_project`. Captures *both* "you should review this" (SR) *and* "this just became relevant" (context).
+- **Hybrid (per `personal-content-resurface/references/algorithms.md`):** score = `w_t·time_decay + w_r·activity_relevance + w_p·static_profile_match − λ·diversity_penalty(item, already_selected_today)`. Captures *both* "you should review this" (time decay) *and* "this just became relevant" (activity + profile), with an MMR-style diversity term applied at top-K selection.
 
 **Failure mode hedge:** Step 2 Q5 #2 — hybrid can be noisy. Ship hybrid as default; expose a `--algo sm2` flag that runs pure SM-2. Log both scores for every item daily; after 2 weeks, compare against user "useful surface" labels. Whichever wins becomes the locked default.
 
@@ -313,7 +313,7 @@ Storage / surface / deploy clusters remain gated on **Step 5 (gepetto)** decisio
 - **Dynamic activity only:** scrape recent vault queries, calendar events, the last 7 days of WA self-DMs as a "what's hot" signal. Noisy without static anchor.
 - **Both:** static profile = baseline relevance; dynamic activity = recency boost. Combined via the user-context provider (Step 4 custom-build, MED complexity).
 
-**Implementation:** user-context provider returns a structured object `{profile: {...}, active_themes: [...], recent_queries: [...]}` on every digest run. Fed as context into the hybrid algorithm's `context_relevance` weight.
+**Implementation:** user-context provider returns a structured object `{profile: {...}, active_themes: [...], recent_queries: [...]}` on every digest run. `profile` feeds `static_profile_match`; `active_themes` + `recent_queries` feed `activity_relevance`.
 
 ### 5.5 Ingest cadence — **Decision: real-time for WA, daily cron for everything else, manual for LinkedIn**
 
@@ -373,29 +373,30 @@ User locked Step 5 in full. Primary grill focus: **hybrid algorithm weights & co
 
 The hybrid score is:
 ```
-score(item) = w1·recency_decay(item)
-            + w2·forgetting_curve(item, last_review)
-            + w3·context_relevance(item, user_context_now)
-            + w4·entity_overlap(item, active_themes)
+score(item) = w_t·time_decay(item)
+            + w_r·activity_relevance(item, recent_activity)
+            + w_p·static_profile_match(item, profile)
+            − λ·diversity_penalty(item, already_selected_today)
 ```
+The `diversity_penalty` is applied MMR-style during top-K selection, not per-item.
 
 Each branch grilled:
 
-**G1. Who picks w1..w4?**
+**G1. Who picks w_t, w_r, w_p, λ?**
 
 - ❌ *Hand-tune at build*: brittle, no signal to inform.
 - ❌ *Static defaults forever*: ignores the whole reason hybrid was chosen — to learn what matters for *this* user.
 - ✅ **Two-phase weight strategy:**
-  - **Phase A (Weeks 1–2, learning-disabled):** fixed defaults `w1=0.2, w2=0.2, w3=0.3, w4=0.3` (slightly context-biased). Both hybrid and SM-2 scores logged for every candidate item daily; only hybrid drives the digest.
-  - **Phase B (Week 3+, learning-enabled):** user labels each daily digest item with one of `{useful, neutral, noise}`. After ≥30 labels, run a logistic regression weekly with the 4 features → updated `w1..w4`. Owned by `dspy-gepa-reflective` post-launch; manual regression script in MVP.
+  - **Phase A (Weeks 1–2, learning-disabled):** fixed defaults `w_t=0.3, w_r=0.4, w_p=0.3, λ=0.7` (activity-biased). Both hybrid and SM-2 scores logged for every candidate item daily; only hybrid drives the digest.
+  - **Phase B (Week 3+, learning-enabled):** user labels each daily digest item with one of `{useful, neutral, noise}`. After ≥30 labels, run a logistic regression weekly with the 3 scoring features → updated `w_t, w_r, w_p` (λ tuned separately on diversity outcomes). Owned by `dspy-gepa-reflective` post-launch; manual regression script in MVP.
 
-**G2. Cold-start: hybrid needs entity overlap & user history. Day 1 has neither.**
+**G2. Cold-start: hybrid needs activity history & profile signal. Day 1 has neither.**
 
 This is the **real** failure mode — the prior plan glossed over it. Concrete cold-start sequence:
 
 - **Day 1–7 ("ingest-only" phase):** No digest delivered. System ingests, normalizes, embeds, extracts entities. Reason: with 0–50 items and no labels, any digest is random. *Stating "no digest yet" beats sending noise.*
-- **Day 8: bootstrap digest.** Triggered when ≥50 items in vault. First digest uses **pure recency-decay** (w1=1.0, others=0) — basically "here's stuff you saved in the last week you may have forgotten about." Lowest-risk algorithm; high baseline value.
-- **Day 9–14: ramped weights.** Each day, shift weights toward `0.2/0.2/0.3/0.3` linearly. Context and entity-overlap signals get progressively more weight as the vault grows.
+- **Day 8: bootstrap digest.** Triggered when ≥50 items in vault. First digest uses **pure time-decay** (`w_t=1.0`, others=0, `λ=0`) — basically "here's stuff you saved in the last week you may have forgotten about." Lowest-risk algorithm; high baseline value.
+- **Day 9–14: ramped weights.** Each day, shift weights linearly toward Phase A defaults (`w_t=0.3, w_r=0.4, w_p=0.3, λ=0.7`). Activity-relevance and profile-match signals get progressively more weight as the vault and activity history grow.
 - **Day 15+: full hybrid.** Phase A defaults active. Labeling begins.
 - **Day 30+: learning-enabled** when ≥30 labels collected.
 
@@ -411,8 +412,8 @@ This sequence is the **cold-start contract** and goes into the PRD verbatim.
 **G4. What if the user's `active_themes` are wrong/stale?**
 
 User-context provider reads `active_themes` from a YAML file the user edits. Two failure modes:
-- *User forgets to update*: themes go stale, w4 signal degrades. Mitigation: weekly Sunday reminder via WA-self to update `active_themes.yaml`. (Reuses the outbound channel.)
-- *User over-broad themes*: w4 fires for everything, becomes noise. Mitigation: cap `active_themes` to ≤5 entries; system enforces in parsing.
+- *User forgets to update*: themes go stale, `activity_relevance` signal degrades. Mitigation: weekly Sunday reminder via WA-self to update `active_themes.yaml`. (Reuses the outbound channel.)
+- *User over-broad themes*: `activity_relevance` fires for everything, becomes noise. Mitigation: cap `active_themes` to ≤5 entries; system enforces in parsing.
 
 **G5. What if SM-2 beats hybrid in the Week-2 A/B?**
 
@@ -499,7 +500,7 @@ All branches resolved. Cold-start sequence is the **new critical artifact** the 
         ┌───────────────────────┐
         │ Labels → parquet      │
         │ Week 3+: regression   │
-        │ updates w1..w4        │
+        │ updates w_t,w_r,w_p   │
         └───────────────────────┘
 ```
 
@@ -567,21 +568,24 @@ All branches resolved. Cold-start sequence is the **new critical artifact** the 
 | Phase | Days | Behavior |
 |---|---|---|
 | Ingest-only | 1–7 | No digest delivered. Vault grows to ≥50 items. |
-| Bootstrap | 8 | First digest = pure recency-decay (w1=1.0). |
-| Ramp | 9–14 | Linear weight shift to `w=0.2/0.2/0.3/0.3`. |
+| Bootstrap | 8 | First digest = pure time-decay (`w_t=1.0`, others=0, `λ=0`). |
+| Ramp | 9–14 | Linear weight shift to `w_t=0.3, w_r=0.4, w_p=0.3, λ=0.7`. |
 | Full hybrid | 15+ | Phase A weights. Both hybrid + SM-2 scores logged. |
-| Learning-enabled | 30+ | After ≥30 labels, weekly logistic regression updates `w1..w4`. |
+| Learning-enabled | 30+ | After ≥30 labels, weekly logistic regression updates `w_t, w_r, w_p`. |
 
 ### 7.8 Hybrid algorithm contract
 
+> Reconciled 2026-05-27 — see `docs/algorithm-reconciliation.md`.
+
 ```python
-score(item) = w1·recency_decay(item)
-            + w2·forgetting_curve(item, last_review)
-            + w3·context_relevance(item, user_context_now)
-            + w4·entity_overlap(item, active_themes)
+score(item) = w_t·time_decay(item)
+            + w_r·activity_relevance(item, recent_activity)
+            + w_p·static_profile_match(item, profile)
+            − λ·diversity_penalty(item, already_selected_today)
 ```
 
-- **Phase A default weights:** `w1=0.2, w2=0.2, w3=0.3, w4=0.3`
+- **Phase A default weights:** `w_t=0.3, w_r=0.4, w_p=0.3, λ=0.7`
+- **`diversity_penalty`:** applied MMR-style during top-K selection, not per-item
 - **Cold-start override:** see §7.7
 - **Label-driven update:** weekly logistic regression on `labels.parquet` from Week 3+
 - **A/B fallback:** SM-2 (`personal-content-resurface` native), `--algo sm2` flag, both scores logged from Day 15
