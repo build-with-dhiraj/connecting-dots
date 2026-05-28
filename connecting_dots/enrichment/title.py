@@ -364,4 +364,195 @@ def _parse_tool_call(response: Any, function_name: str) -> dict[str, Any]:
     return {}
 
 
-__all__ = ["TitleResult", "rewrite", "needs_rewrite"]
+# --------------------------------------------------------------------------- #
+# WhatsApp media filename parser
+# --------------------------------------------------------------------------- #
+_MONTH_NAMES = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+# Patterns: IMG-YYYYMMDD-WAnnnn.ext, AUD-YYYY-MM-DD-HH-MM-SS.ext,
+#           PTT-YYYYMMDD-WAnnnn.ext, VID-YYYYMMDD-WAnnnn.ext, DOC-...
+_WA_MEDIA_RE = re.compile(
+    r"^(?P<prefix>IMG|AUD|PTT|VID|DOC)"
+    r"[-_]"
+    r"(?:(?P<y1>\d{4})(?P<m1>\d{2})(?P<d1>\d{2})"
+    r"|(?P<y2>\d{4})-(?P<m2>\d{2})-(?P<d2>\d{2}))"
+    r"[-_]",
+    re.IGNORECASE,
+)
+
+_PREFIX_TO_KIND: dict[str, str] = {
+    "IMG": "Image",
+    "AUD": "Audio",
+    "PTT": "Voice note",
+    "VID": "Video",
+    "DOC": "Document",
+}
+
+
+def parse_wa_media_filename(filename: str) -> Optional[dict[str, str]]:
+    """Parse a WhatsApp media filename into kind and human-readable date.
+
+    Returns a dict with keys ``kind`` and ``date_human``, or ``None`` if the
+    filename doesn't match any known WhatsApp media pattern.
+    """
+    m = _WA_MEDIA_RE.match(filename)
+    if not m:
+        return None
+
+    prefix = (m.group("prefix") or "").upper()
+    kind = _PREFIX_TO_KIND.get(prefix, "File")
+
+    y = m.group("y1") or m.group("y2")
+    mo = m.group("m1") or m.group("m2")
+    d = m.group("d1") or m.group("d2")
+
+    if not (y and mo and d):
+        return {"kind": kind, "date_human": ""}
+
+    try:
+        month_idx = int(mo) - 1
+        if not 0 <= month_idx <= 11:
+            return {"kind": kind, "date_human": ""}
+        month_name = _MONTH_NAMES[month_idx]
+        date_human = f"{int(d)} {month_name} {y}"
+    except (ValueError, IndexError):
+        return {"kind": kind, "date_human": ""}
+
+    return {"kind": kind, "date_human": date_human}
+
+
+# --------------------------------------------------------------------------- #
+# Untitled Note fallback — Layer 2 LLM call
+# --------------------------------------------------------------------------- #
+_UNTITLED_SYSTEM_PROMPT = """\
+You are titling a saved note that has no readable body. Generate a clean
+5-8 word noun phrase title using the entities and topics below.
+
+Rules:
+- Must be a noun phrase, 5-8 words
+- Must reflect the entities/topics — do NOT be generic
+- Do NOT include: Note, Message, WhatsApp, Attachment, Untitled
+- Do NOT start with "A" or "The"
+- Proper nouns and technical terms are fine
+- Always call record_title exactly once
+
+Examples of good titles:
+- "Anthropic Claude Code free course notes"
+- "Bharat Electronics quarterly results brief"
+- "Stripe pricing page reference"
+
+Examples of bad titles:
+- "Note about Anthropic" (lazy)
+- "Untitled Note" (forbidden)
+- "WhatsApp message" (uninformative)
+"""
+
+
+def call_llm_for_title(
+    *,
+    entities: list,
+    topics: list,
+    source: str = "",
+    model: Optional[str] = None,
+    client: Optional[AzureOpenAI] = None,
+) -> str:
+    """Ask the LLM to generate a title from entity/topic metadata.
+
+    Returns the title string, or empty string on failure.
+    """
+    chosen_model = (
+        model
+        or os.environ.get("TITLE_MODEL")
+        or os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+        or DEFAULT_MODEL
+    )
+    api = client or _get_client()
+
+    ents_str = ", ".join(str(e) for e in (entities or []))
+    tops_str = ", ".join(str(t) for t in (topics or []))
+    user_content = (
+        f"Entities: {ents_str or '(none)'}\n"
+        f"Topics: {tops_str or '(none)'}\n"
+        f"Source platform: {source or 'unknown'}"
+    )
+
+    try:
+        response = api.chat.completions.create(
+            model=chosen_model,
+            max_tokens=MAX_TOKENS,
+            tools=[_TITLE_TOOL],
+            tool_choice={"type": "function", "function": {"name": "record_title"}},
+            messages=[
+                {"role": "system", "content": _UNTITLED_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        raw = _parse_tool_call(response, "record_title")
+        return (raw.get("title") or "").strip()
+    except Exception as e:
+        log.warning("LLM title from entities failed: %s", e)
+        return ""
+
+
+# --------------------------------------------------------------------------- #
+# Smarter fallback for "Untitled Note" residue
+# --------------------------------------------------------------------------- #
+def derive_better_title(
+    fm: dict,
+    *,
+    model: Optional[str] = None,
+    client: Optional[AzureOpenAI] = None,
+) -> tuple:
+    """Return a more meaningful title than 'Untitled Note' and the source layer.
+
+    Tries three layers in order:
+    1. WhatsApp media filename pattern — deterministic, no LLM cost.
+    2. Entity/topic LLM call — uses existing metadata.
+    3. date+source fallback — always produces something.
+
+    Returns:
+        (title, source) where source is one of
+        ``"filename"``, ``"entity-llm"``, ``"date-fallback"``.
+    """
+    # Layer 1 — filename signal
+    raw_meta = fm.get("raw_meta") or {}
+    media_filename = raw_meta.get("media_filename") or ""
+    if media_filename:
+        parsed = parse_wa_media_filename(media_filename)
+        if parsed and parsed["date_human"]:
+            return f"{parsed['kind']} from {parsed['date_human']}", "filename"
+        if parsed and parsed["kind"]:
+            return parsed["kind"], "filename"
+
+    # Layer 2 — entity/topic LLM
+    ents = fm.get("entities") or []
+    tops = fm.get("topics") or []
+    if ents or tops:
+        title = call_llm_for_title(
+            entities=ents,
+            topics=tops,
+            source=str(fm.get("source") or ""),
+            model=model,
+            client=client,
+        )
+        if title and title.lower() != "untitled note":
+            return title, "entity-llm"
+
+    # Layer 3 — date + source
+    captured = str(fm.get("captured_at") or "")
+    source = str(fm.get("source") or "note")
+    date_part = captured[:10] if len(captured) >= 10 else captured
+    return f"{source.title()} note from {date_part}", "date-fallback"
+
+
+__all__ = [
+    "TitleResult",
+    "rewrite",
+    "needs_rewrite",
+    "parse_wa_media_filename",
+    "derive_better_title",
+    "call_llm_for_title",
+]

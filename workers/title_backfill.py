@@ -25,7 +25,7 @@ from typing import Any, Iterable, Optional
 import yaml
 from tqdm import tqdm
 
-from connecting_dots.enrichment.title import needs_rewrite, rewrite
+from connecting_dots.enrichment.title import derive_better_title, needs_rewrite, rewrite
 from lib.vault_writer.writer import _resolve_vault_root
 
 log = logging.getLogger("title_backfill")
@@ -253,6 +253,127 @@ async def _run_batch(
 
 
 # --------------------------------------------------------------------------- #
+# Fix-untitled helpers
+# --------------------------------------------------------------------------- #
+def _is_untitled_candidate(fm: dict) -> bool:
+    """True if the note was rewritten but produced 'Untitled Note' and has not
+    yet been fixed by the v2 pass."""
+    raw_meta = fm.get("raw_meta") or {}
+    if not isinstance(raw_meta, dict):
+        return False
+    if not raw_meta.get("original_title"):
+        return False
+    if str(fm.get("title") or "").strip() != "Untitled Note":
+        return False
+    if raw_meta.get("title_v2_at"):
+        return False
+    return True
+
+
+def _process_untitled_sync(
+    note_path: Path,
+    *,
+    model: Optional[str],
+    vault_root: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    rel = note_path.relative_to(vault_root).as_posix()
+
+    try:
+        text = note_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return {"status": "read_error", "path": rel, "error": str(e)}
+
+    fm, body = _split_frontmatter(text)
+    if fm is None:
+        return {"status": "no_frontmatter", "path": rel}
+
+    if not _is_untitled_candidate(fm):
+        return {"status": "skipped", "path": rel}
+
+    if dry_run:
+        log.info("  [dry-run] Would fix untitled: %s", rel)
+        return {"status": "dry_run", "path": rel}
+
+    new_title, title_source = derive_better_title(fm, model=model)
+
+    if not new_title or new_title.lower() == "untitled note":
+        return {
+            "status": "error",
+            "path": rel,
+            "error": "derive_better_title returned empty/untitled",
+        }
+
+    new_fm = dict(fm)
+    new_fm["title"] = new_title
+    raw_meta = dict(new_fm.get("raw_meta") or {})
+    raw_meta["title_v2_at"] = _now_iso()
+    raw_meta["title_v2_source"] = title_source
+    new_fm["raw_meta"] = raw_meta
+
+    try:
+        _write_note_atomic(note_path, new_fm, body)
+    except OSError as e:
+        return {"status": "write_error", "path": rel, "error": str(e)}
+
+    return {
+        "status": "ok",
+        "path": rel,
+        "old_title": "Untitled Note",
+        "new_title": new_title,
+        "source": title_source,
+    }
+
+
+async def _run_untitled_batch(
+    paths: list[Path],
+    *,
+    concurrency: int,
+    model: Optional[str],
+    vault_root: Path,
+    dry_run: bool,
+) -> dict[str, int]:
+    sem = asyncio.Semaphore(concurrency)
+    counts: dict[str, int] = {"ok": 0, "skipped": 0, "error": 0, "dry_run": 0}
+
+    progress = tqdm(
+        total=len(paths), desc="fix-untitled", unit="note", disable=not sys.stderr.isatty()
+    )
+
+    async def _one(p: Path) -> None:
+        async with sem:
+            res = await asyncio.to_thread(
+                _process_untitled_sync,
+                p,
+                model=model,
+                vault_root=vault_root,
+                dry_run=dry_run,
+            )
+        status = res.get("status", "")
+        if status == "ok":
+            counts["ok"] += 1
+            log.info(
+                "  fixed: %s -> %s [%s]",
+                res.get("path"),
+                res.get("new_title"),
+                res.get("source"),
+            )
+        elif status == "skipped":
+            counts["skipped"] += 1
+        elif status == "dry_run":
+            counts["dry_run"] += 1
+        else:
+            counts["error"] += 1
+            log.warning("%s: %s", res.get("path"), res)
+        progress.update(1)
+        progress.set_postfix(ok=counts["ok"], skip=counts["skipped"], err=counts["error"])
+
+    await asyncio.gather(*(_one(p) for p in paths))
+    progress.close()
+    return counts
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def main(argv: Optional[list[str]] = None) -> int:
@@ -265,6 +386,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--model", default=None)
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
+    parser.add_argument(
+        "--fix-untitled",
+        action="store_true",
+        help=(
+            "Re-title only notes still named 'Untitled Note' using smarter "
+            "fallback chain (filename → entity LLM → date+source)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -276,6 +405,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     all_paths = list(_iter_vault_notes(vault_root))
     if args.limit:
         all_paths = all_paths[: args.limit]
+
+    if args.fix_untitled:
+        log.info(
+            "fix-untitled mode: scanning %d notes, concurrency=%d, dry_run=%s",
+            len(all_paths),
+            args.concurrency,
+            args.dry_run,
+        )
+        counts = asyncio.run(
+            _run_untitled_batch(
+                all_paths,
+                concurrency=max(1, args.concurrency),
+                model=args.model,
+                vault_root=vault_root,
+                dry_run=args.dry_run,
+            )
+        )
+        log.info(
+            "Done (fix-untitled). ok=%d skipped=%d errors=%d dry_run=%d",
+            counts["ok"],
+            counts["skipped"],
+            counts["error"],
+            counts["dry_run"],
+        )
+        return 0
 
     log.info(
         "Processing %d notes, concurrency=%d, dry_run=%s",
