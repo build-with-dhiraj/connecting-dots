@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from connecting_dots.digest.resurface import DigestItem
 from connecting_dots.digest.why_reason import WhyResult, generate_reason, generate_reasons

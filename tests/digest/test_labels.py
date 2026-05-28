@@ -2,12 +2,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
 import pytest
 
 from connecting_dots.digest.labels import (
-    LabelRow,
     decode_row_id,
     encode_row_id,
     read_labels,

@@ -1,23 +1,16 @@
 """Tests for connecting_dots.digest.resurface."""
 from __future__ import annotations
 
-import json
-import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 import yaml
 
 from connecting_dots.digest.resurface import (
-    DEFAULT_WEIGHTS,
     DigestItem,
     _activity_relevance,
-    _diversity_penalty,
-    _effective_weights,
     _static_profile_match,
     _time_decay,
-    load_vault_notes,
     select_digest_items,
 )
 
@@ -47,7 +40,6 @@ def _write_note(tmp_path: Path, slug: str, *, title: str, topics: list[str], ent
 def _make_vault(tmp_path: Path, n: int = 10) -> Path:
     """Create a minimal vault with n notes under sources/web/."""
     vault = tmp_path / "vault"
-    today = date.today()
     for i in range(n):
         days_ago = i * 15  # spread out over time
         captured = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")

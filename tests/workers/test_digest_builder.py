@@ -4,9 +4,8 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 import yaml
 
 
@@ -84,7 +83,7 @@ def test_digest_builder_writes_queue_and_log(mock_reasons, tmp_path):
     log_path = tmp_path / "log.jsonl"
 
     from workers.digest_builder import run
-    result = run(
+    run(
         vault_root=vault,
         k=3,
         dry_run=False,
@@ -138,8 +137,8 @@ def test_digest_builder_writes_markdown_to_vault(mock_reasons, tmp_path):
 
     from workers.digest_builder import run
     today = date(2026, 5, 29)
-    result = run(vault_root=vault, k=3, dry_run=False, send_wa=False,
-                 queue_path=queue_path, log_path=log_path, digest_date=today)
+    run(vault_root=vault, k=3, dry_run=False, send_wa=False,
+        queue_path=queue_path, log_path=log_path, digest_date=today)
 
     digest_file = vault / "digests" / "2026-05-29.md"
     assert digest_file.exists(), "Digest markdown not written"

@@ -28,10 +28,8 @@ from typing import Any, Optional
 
 import yaml
 
-from connecting_dots.digest.labels import read_labels
 from connecting_dots.digest.resurface import (
     DigestItem,
-    _default_digest_log,
     load_vault_notes,
     select_digest_items,
 )
