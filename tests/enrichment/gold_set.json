@@ -1,0 +1,220 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "purpose": "Hand-crafted synthetic NER+topic gold set for the Claude extractor. Mirrors the production distribution (finance, tech, personal saves, founder/investing content, philosophical notes). NO real user data — every name, company, and quote is fabricated or sourced from public-domain reference (well-known people/products).",
+    "scoring": "Set-based P/R/F1 with case-insensitive + intra-space-collapsed entity match (so 'OpenAI' == 'Open AI'). Topics: exact lowercase match after strip. See connecting_dots/enrichment/judge.py.",
+    "target_aggregate_f1": 0.70
+  },
+  "items": [
+    {
+      "name": "naval_wealth_tweet",
+      "title": "Naval Ravikant on wealth vs status",
+      "text": "Seek wealth, not money or status. Wealth is having assets that earn while you sleep. Money is how we transfer time and wealth. Status is your place in the social hierarchy. Play long-term games with long-term people.",
+      "expected_entities": ["Naval Ravikant"],
+      "expected_topics": ["wealth building", "personal finance"]
+    },
+    {
+      "name": "coreweave_lambda_gpu",
+      "title": "Coreweave vs Lambda — GPU compute economics",
+      "text": "Coreweave has H100 capacity locked in with NVIDIA. Lambda Labs going more retail. Both burning cash to lock supply before the LLM training squeeze. Microsoft and OpenAI both committed multi-year contracts.",
+      "expected_entities": ["CoreWeave", "Lambda Labs", "NVIDIA", "H100", "Microsoft", "OpenAI"],
+      "expected_topics": ["gpu compute", "ai infrastructure"]
+    },
+    {
+      "name": "buffett_munger_method",
+      "title": "Warren Buffett and Charlie Munger investment method",
+      "text": "The Berkshire approach: find a wonderful business at a fair price, not a fair business at a wonderful price. Munger called it 'sit on your ass investing'. Coca-Cola, See's Candies, Apple — concentrated bets, decades of holding.",
+      "expected_entities": ["Warren Buffett", "Charlie Munger", "Berkshire Hathaway", "Coca-Cola", "See's Candies", "Apple"],
+      "expected_topics": ["value investing", "long term investing"]
+    },
+    {
+      "name": "kahneman_system_1_2",
+      "title": "Daniel Kahneman — Thinking Fast and Slow",
+      "text": "System 1 is fast, intuitive, emotional. System 2 is slow, deliberate, logical. Most of our decisions run on System 1 and we confabulate System 2 justifications after the fact. The anchoring effect, availability heuristic, loss aversion — all System 1 shortcuts.",
+      "expected_entities": ["Daniel Kahneman", "Thinking Fast and Slow"],
+      "expected_topics": ["cognitive biases", "behavioral economics", "decision making"]
+    },
+    {
+      "name": "yc_startup_school_advice",
+      "title": "Y Combinator startup school — talk to users",
+      "text": "Paul Graham's advice never changes: do things that don't scale. Talk to users. Build something people want. Sam Altman added: pick the right founder, pick the right idea, build a great product, get to PMF. Everything else is noise.",
+      "expected_entities": ["Y Combinator", "Paul Graham", "Sam Altman"],
+      "expected_topics": ["startup advice", "product market fit"]
+    },
+    {
+      "name": "spaced_repetition_anki",
+      "title": "Spaced repetition for technical interviews",
+      "text": "Using Anki for system design and DSA. The SM-2 algorithm spreads reviews exponentially. Michael Nielsen's essay on Augmenting Long-term Memory convinced me. Daily 20-card reviews, no skipping.",
+      "expected_entities": ["Anki", "SM-2", "Michael Nielsen"],
+      "expected_topics": ["spaced repetition", "learning"]
+    },
+    {
+      "name": "second_brain_obsidian",
+      "title": "Second brain in Obsidian — graph view",
+      "text": "Tiago Forte's PARA framework mapped onto Obsidian. The graph view actually shows clusters when wikilinks are dense enough. Roam was first but Obsidian won on local-first and plugins.",
+      "expected_entities": ["Tiago Forte", "Obsidian", "Roam Research", "PARA"],
+      "expected_topics": ["second brain", "note taking", "knowledge management"]
+    },
+    {
+      "name": "fed_rate_cut_2026",
+      "title": "Fed rate cut and the bond market",
+      "text": "Jerome Powell signaled a 25bp cut at the FOMC meeting. Ten-year treasury yields dropped 12bp. Mortgage spreads still elevated. Inflation print last week was 2.4% headline, 2.7% core. Soft landing scenario still in play.",
+      "expected_entities": ["Jerome Powell", "Federal Reserve", "FOMC"],
+      "expected_topics": ["monetary policy", "interest rates", "macroeconomics"]
+    },
+    {
+      "name": "india_household_brands",
+      "title": "India household brand investment thesis",
+      "text": "HUL, Nestle India, Britannia — the consumption story. Patanjali disruption mostly digested. D-Mart still the operating story. Tier-2 city penetration the next leg. Rural distribution is the moat.",
+      "expected_entities": ["Hindustan Unilever", "Nestle India", "Britannia", "Patanjali", "D-Mart"],
+      "expected_topics": ["india equities", "consumer staples", "investing"]
+    },
+    {
+      "name": "claude_anthropic_release",
+      "title": "Anthropic ships Claude 4.7",
+      "text": "Adaptive thinking only — no more budget_tokens. 1M context window standard pricing. New high-resolution vision up to 2576px. The xhigh effort level is the new default in Claude Code.",
+      "expected_entities": ["Anthropic", "Claude", "Claude Code"],
+      "expected_topics": ["large language models", "ai tools"]
+    },
+    {
+      "name": "rick_astley_song",
+      "title": "Rick Astley — Never Gonna Give You Up",
+      "text": "Released 1987. Stock Aitken Waterman production. The original music video has 1.5 billion YouTube views. Rickrolling as a meme started around 2007 on 4chan.",
+      "expected_entities": ["Rick Astley", "Never Gonna Give You Up", "YouTube", "4chan"],
+      "expected_topics": ["music", "internet culture"]
+    },
+    {
+      "name": "vikas_khanna_recipe",
+      "title": "Bhapa Doi by chef Vikas Khanna",
+      "text": "Bengali steamed yogurt dessert. Hung curd, condensed milk, cardamom. Steam 20 minutes in ramekins, chill overnight. Garnish with pistachios. The chef demonstrated this on a YouTube short.",
+      "expected_entities": ["Vikas Khanna", "Bhapa Doi"],
+      "expected_topics": ["cooking", "indian cuisine"]
+    },
+    {
+      "name": "akash_decentralized_compute",
+      "title": "Akash Network — decentralized GPU compute",
+      "text": "Akash is a marketplace for compute on Cosmos. Anyone can list a GPU rig and earn AKT. Pricing 50-70% below AWS for equivalent A100/H100 instances. The bet: AI compute demand outpaces hyperscaler buildout.",
+      "expected_entities": ["Akash Network", "Cosmos", "AWS", "A100", "H100"],
+      "expected_topics": ["decentralized compute", "crypto infrastructure"]
+    },
+    {
+      "name": "philosophy_consciousness",
+      "title": "On consciousness and the hard problem",
+      "text": "David Chalmers framed the hard problem of consciousness in 1995. Why is there something it is like to be a thing? Daniel Dennett pushes back: it's an illusion all the way down. Integrated Information Theory (Tononi) gets specific.",
+      "expected_entities": ["David Chalmers", "Daniel Dennett", "Giulio Tononi", "Integrated Information Theory"],
+      "expected_topics": ["philosophy of mind", "consciousness"]
+    },
+    {
+      "name": "shoe_dog_phil_knight",
+      "title": "Shoe Dog by Phil Knight",
+      "text": "Phil Knight's memoir on building Nike. Started selling Onitsuka Tigers out of his car after the Stanford MBA. The break with Bowerman, the Japanese trips, Blue Ribbon Sports becoming Nike in 1971. Worth re-reading every few years.",
+      "expected_entities": ["Phil Knight", "Nike", "Shoe Dog", "Bill Bowerman", "Onitsuka", "Stanford"],
+      "expected_topics": ["founder stories", "business history"]
+    },
+    {
+      "name": "whatsapp_image_no_caption",
+      "title": "WhatsApp Image 42",
+      "text": "",
+      "expected_entities": [],
+      "expected_topics": []
+    },
+    {
+      "name": "plain_thought_no_entities",
+      "title": "A plain text thought",
+      "text": "Sometimes you just need to write something down to figure out what you actually think. The medium is the message and the writing is the thinking.",
+      "expected_entities": [],
+      "expected_topics": ["writing", "thinking"]
+    },
+    {
+      "name": "thiel_zero_to_one",
+      "title": "Thiel — Zero to One",
+      "text": "Peter Thiel's thesis: competition is for losers. Build a monopoly. The PayPal mafia did exactly that. Last mover advantage > first mover. Definite optimism vs indefinite optimism.",
+      "expected_entities": ["Peter Thiel", "Zero to One", "PayPal"],
+      "expected_topics": ["startup strategy", "venture capital"]
+    },
+    {
+      "name": "mit_algorithms_lecture",
+      "title": "MIT 6.006 — Dynamic Arrays",
+      "text": "Erik Demaine's lecture on dynamic arrays. Amortized O(1) append via doubling. The python list internals do exactly this. Resizing factor 1.125 vs the textbook 2x because Python optimizes for memory.",
+      "expected_entities": ["MIT", "Erik Demaine", "Python"],
+      "expected_topics": ["algorithms", "data structures"]
+    },
+    {
+      "name": "mutual_funds_india_sip",
+      "title": "Mutual fund SIPs in India — 5 year returns",
+      "text": "Parag Parikh Flexi Cap topping the charts at 24% CAGR over 5 years. Mirae Asset Large Cap solid 17%. SBI Small Cap volatile but 26% if you stayed in. Nifty 50 index funds boring 14%.",
+      "expected_entities": ["Parag Parikh Flexi Cap", "Mirae Asset", "SBI", "Nifty 50"],
+      "expected_topics": ["mutual funds", "india equities", "personal finance"]
+    },
+    {
+      "name": "byju_collapse",
+      "title": "Lessons from Byju's collapse",
+      "text": "Aggressive expansion through Whitehat Jr, Aakash, Epic acquisitions. Burned through $5B in funding. Sequoia and Prosus marked it down to near zero. The aggressive sales culture and accounting issues caught up. Edtech valuation reset for everyone.",
+      "expected_entities": ["Byju's", "WhiteHat Jr", "Aakash", "Sequoia Capital", "Prosus"],
+      "expected_topics": ["edtech", "startup failure"]
+    },
+    {
+      "name": "ai_evaluation_playbook",
+      "title": "AI evaluation playbook — Hamel Husain",
+      "text": "Hamel's three pillars: error analysis first, then write the judge prompt, then validate the judge against human labels. Don't trust LLM-as-judge until you've calibrated it. Track precision/recall per failure mode.",
+      "expected_entities": ["Hamel Husain"],
+      "expected_topics": ["llm evaluation", "ai evaluation"]
+    },
+    {
+      "name": "self_dm_random_url",
+      "title": "https://example.com/smoke-url",
+      "text": "Smoke test. No content.",
+      "expected_entities": [],
+      "expected_topics": []
+    },
+    {
+      "name": "stocks_to_watch_2026",
+      "title": "Stocks to watch — Indian Hume Pipe, Ashok Leyland",
+      "text": "Indian Hume Pipe Company on a multi-year capex cycle. Ashok Leyland medium commercial vehicle pickup. Both classic infrastructure plays. Looking at PE compression vs forward earnings.",
+      "expected_entities": ["Indian Hume Pipe Company", "Ashok Leyland"],
+      "expected_topics": ["india equities", "infrastructure"]
+    },
+    {
+      "name": "ai_pmf_startup",
+      "title": "AI startups in upskilling — talent assessment infrastructure",
+      "text": "Sybill, Korn Ferry exploring AI assessments. Mercer pushing skills graph. Going Out economy thesis for India — Anysphere doing developer hiring at scale. Building behavioural assessment evals is the moat.",
+      "expected_entities": ["Sybill", "Korn Ferry", "Mercer", "Anysphere"],
+      "expected_topics": ["ai startups", "talent assessment"]
+    },
+    {
+      "name": "buffett_munger_research_method",
+      "title": "Warren Buffett Charlie Munger deep analysis method",
+      "text": "Read 500 pages a day. Mental models from multiple disciplines — biology, physics, psychology, history. Munger's lattice of theory. Buffett's owner earnings calculation. Look-through earnings for equity portfolios.",
+      "expected_entities": ["Warren Buffett", "Charlie Munger"],
+      "expected_topics": ["value investing", "mental models"]
+    },
+    {
+      "name": "perplexity_search_history",
+      "title": "Perplexity and the future of search",
+      "text": "Aravind Srinivas building a Google alternative on top of LLMs. Citations as first-class output. The Pro Search agentic flow. Free tier ad-supported, Pro at $20/month. Competing with Google's AI Overviews and ChatGPT search.",
+      "expected_entities": ["Perplexity", "Aravind Srinivas", "Google", "ChatGPT"],
+      "expected_topics": ["ai search", "large language models"]
+    },
+    {
+      "name": "weekly_protocol_health",
+      "title": "Dhiraj daily protocol",
+      "text": "Wake 6am. 20 min Wim Hof breathing. Cold shower. 30g protein breakfast. Vitamin D 2000IU. B12 sublingual. Walk 8000 steps. No screens after 10pm.",
+      "expected_entities": ["Wim Hof", "Vitamin D", "B12"],
+      "expected_topics": ["health protocol", "habits"]
+    },
+    {
+      "name": "newton_systematic_approach",
+      "title": "Newton would approach this systematically",
+      "text": "Isaac Newton's method: observe, hypothesize, test, refine. The Principia Mathematica laid out the calculus and the laws of motion simultaneously. Standing on the shoulders of giants — Galileo, Kepler, Hooke. The Royal Society as the institutional layer.",
+      "expected_entities": ["Isaac Newton", "Principia Mathematica", "Galileo", "Johannes Kepler", "Robert Hooke", "Royal Society"],
+      "expected_topics": ["scientific method", "history of science"]
+    },
+    {
+      "name": "happiness_rankings_data",
+      "title": "World happiness rankings analysis",
+      "text": "Nordic countries dominate — Finland, Denmark, Iceland, Norway, Sweden in the top 7. Strong correlation with social trust, low corruption, high welfare spending. The US ranks 23rd, slipping. India around 126. The Gallup World Poll methodology debated.",
+      "expected_entities": ["Finland", "Denmark", "Iceland", "Norway", "Sweden", "United States", "India", "Gallup"],
+      "expected_topics": ["happiness research", "social indicators"]
+    }
+  ]
+}

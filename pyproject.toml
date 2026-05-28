@@ -22,6 +22,10 @@ dependencies = [
     # WhatsApp Export Chat ZIP watcher — used to parse iOS/Android timestamp
     # strings in `_chat.txt` (locale ambiguity: DD/MM/YYYY vs MM/DD/YYYY).
     "python-dateutil>=2.9",
+    # NER + topic extraction (#8) — Claude API with prompt caching + tool use.
+    "anthropic>=0.40",
+    # Backfill progress bar.
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
