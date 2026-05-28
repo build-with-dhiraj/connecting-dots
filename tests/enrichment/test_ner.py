@@ -13,7 +13,6 @@ All Claude API calls are mocked — no live network. We verify:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
