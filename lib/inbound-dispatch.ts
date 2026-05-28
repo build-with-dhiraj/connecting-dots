@@ -346,8 +346,31 @@ export function whatsappToEnvelope(m: InboundMessageEnvelope): InboundEnvelope |
     return { ...base, message_type: "location", ...(text ? { text } : {}) };
   }
 
-  if (type === "contacts" || type === "interactive") {
+  if (type === "contacts") {
     return { ...base, message_type: type };
+  }
+
+  if (type === "interactive") {
+    // Extract interactive reply data (button_reply or list_reply)
+    const interactiveData = raw?.interactive;
+    const interactiveType = interactiveData?.type;
+    let interactiveId: string | undefined;
+    let interactiveTitle: string | undefined;
+
+    if (interactiveType === "list_reply") {
+      interactiveId = _maybeStr(interactiveData?.list_reply?.id);
+      interactiveTitle = _maybeStr(interactiveData?.list_reply?.title);
+    } else if (interactiveType === "button_reply") {
+      interactiveId = _maybeStr(interactiveData?.button_reply?.id);
+      interactiveTitle = _maybeStr(interactiveData?.button_reply?.title);
+    }
+
+    return {
+      ...base,
+      message_type: "interactive",
+      ...(interactiveId ? { interactive_id: interactiveId } : {}),
+      ...(interactiveTitle ? { interactive_title: interactiveTitle } : {}),
+    };
   }
 
   // Anything else — including future Meta types we don't know about yet —

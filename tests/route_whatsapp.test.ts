@@ -237,3 +237,112 @@ describe("GET /api/webhooks/whatsapp (verify handshake)", () => {
     expect(res.status).toBe(403);
   });
 });
+
+// --- Interactive reply (digest reaction) tests ---
+
+describe("POST /api/webhooks/whatsapp — interactive digest reactions", () => {
+  const makeInteractivePayload = (rowId: string) => ({
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        id: "WABA-1",
+        changes: [
+          {
+            value: {
+              metadata: { phone_number_id: "555" },
+              messages: [
+                {
+                  id: "wamid.interactive1",
+                  from: "918595087697",
+                  type: "interactive",
+                  interactive: {
+                    type: "list_reply",
+                    list_reply: {
+                      id: rowId,
+                      title: "👍 Loved it",
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  it("200s when an interactive list_reply with a digest row ID is received", async () => {
+    // Row ID: "sources/web/note.md__up"
+    const rowId = "sources/web/note.md__up";
+    const body = JSON.stringify(makeInteractivePayload(rowId));
+    const res = await POST(
+      makeReq({
+        method: "POST",
+        url: "https://app.example/api/webhooks/whatsapp",
+        body,
+        headers: { "x-hub-signature-256": sign(body), "content-type": "application/json" },
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("does NOT forward digest reactions to xadd (labels handled locally)", async () => {
+    const rowId = "sources/web/note.md__shrug";
+    const body = JSON.stringify(makeInteractivePayload(rowId));
+    await POST(
+      makeReq({
+        method: "POST",
+        url: "https://app.example/api/webhooks/whatsapp",
+        body,
+        headers: { "x-hub-signature-256": sign(body) },
+      }),
+    );
+    // digest reactions should NOT be forwarded to the redis stream
+    expect(xaddMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards non-digest interactive messages to xadd normally", async () => {
+    // A button_reply without the __ separator pattern falls through to normal dispatch
+    const payload = {
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          id: "WABA-1",
+          changes: [
+            {
+              value: {
+                metadata: { phone_number_id: "555" },
+                messages: [
+                  {
+                    id: "wamid.interactive2",
+                    from: "918595087697",
+                    type: "interactive",
+                    interactive: {
+                      type: "button_reply",
+                      button_reply: {
+                        id: "some-regular-button-no-double-underscore",
+                        title: "Yes",
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const body = JSON.stringify(payload);
+    const res = await POST(
+      makeReq({
+        method: "POST",
+        url: "https://app.example/api/webhooks/whatsapp",
+        body,
+        headers: { "x-hub-signature-256": sign(body) },
+      }),
+    );
+    expect(res.status).toBe(200);
+    // Non-digest interactive should be dispatched to stream
+    expect(xaddMock).toHaveBeenCalledTimes(1);
+  });
+});

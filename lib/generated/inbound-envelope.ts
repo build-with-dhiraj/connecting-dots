@@ -53,6 +53,14 @@ export interface InboundEnvelope {
    */
   text?: string;
   /**
+   * For `message_type == "interactive"`: the ID of the selected list row or button. Encodes `<slug>__<reaction>` for digest reactions.
+   */
+  interactive_id?: string;
+  /**
+   * For `message_type == "interactive"`: the display title of the selected row/button.
+   */
+  interactive_title?: string;
+  /**
    * Origin channel — must match `connecting_dots.dispatcher.SourceChannel`.
    */
   source: "whatsapp" | "mailto" | "linkedin" | "manual";
