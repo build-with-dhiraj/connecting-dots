@@ -16,8 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from workers.vault_readme_refresh import (
     _write_atomic,
     count_notes,
