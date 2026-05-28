@@ -1,7 +1,8 @@
 """Tag dedup backfill CLI.
 
 Subcommands: build-map | apply | all (default)
-Flags: --limit N, --dry-run, --reuse-map, --force-rebuild, --model, --map-path, --log-level
+Flags: --limit N, --dry-run, --reuse-map, --force-rebuild, --model, --map-path,
+       --log-level, --embed-threshold, --no-embeddings, --embed-cache-path
 """
 from __future__ import annotations
 
@@ -59,7 +60,16 @@ def _collect_tags(vault_root: Path) -> list[str]:
     return sorted(unique)
 
 
-def cmd_build_map(map_path: Path, model: str, reuse_map: bool, force_rebuild: bool, dry_run: bool) -> dict[str, str]:
+def cmd_build_map(
+    map_path: Path,
+    model: str,
+    reuse_map: bool,
+    force_rebuild: bool,
+    dry_run: bool,
+    embed_threshold: float = 0.85,
+    no_embeddings: bool = False,
+    embed_cache_path: Optional[Path] = None,
+) -> dict[str, str]:
     from connecting_dots.enrichment.tag_dedup import phase_c, load_map
 
     if reuse_map and not force_rebuild and map_path.exists():
@@ -71,7 +81,15 @@ def cmd_build_map(map_path: Path, model: str, reuse_map: bool, force_rebuild: bo
     all_tags = _collect_tags(vault_root)
     log.info("Found %d unique tags", len(all_tags))
 
-    mapping = phase_c(all_tags, cache_path=map_path, model=model, skip_llm=dry_run)
+    mapping = phase_c(
+        all_tags,
+        cache_path=map_path,
+        model=model,
+        skip_llm=dry_run,
+        embed_cache_path=embed_cache_path,
+        embed_threshold=embed_threshold,
+        no_embeddings=no_embeddings,
+    )
 
     n_canonical = len(set(mapping.values()))
     n_mapped = sum(1 for k, v in mapping.items() if k != v)
@@ -165,6 +183,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--map-path", default=None)
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
+    parser.add_argument("--embed-threshold", type=float, default=0.85,
+                        help="Cosine similarity threshold for embedding-based candidate pairs (default: 0.85)")
+    parser.add_argument("--no-embeddings", action="store_true",
+                        help="Force lexical fallback candidate generation (skip embeddings)")
+    parser.add_argument("--embed-cache-path", default=None,
+                        help="Path to cache tag embeddings (default: data/tag_embeddings.json)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -172,6 +196,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     model = args.model or os.environ.get("NER_MODEL", "gpt-4.1")
     map_path = Path(args.map_path) if args.map_path else DEFAULT_MAP_PATH
+    embed_cache_path = (
+        Path(args.embed_cache_path) if args.embed_cache_path
+        else Path("data/tag_embeddings.json")
+    )
 
     try:
         vault_root = _resolve_vault_root()
@@ -180,8 +208,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     if args.subcommand in ("build-map", "all"):
-        cmd_build_map(map_path=map_path, model=model, reuse_map=args.reuse_map,
-                      force_rebuild=args.force_rebuild, dry_run=args.dry_run)
+        cmd_build_map(
+            map_path=map_path,
+            model=model,
+            reuse_map=args.reuse_map,
+            force_rebuild=args.force_rebuild,
+            dry_run=args.dry_run,
+            embed_threshold=args.embed_threshold,
+            no_embeddings=args.no_embeddings,
+            embed_cache_path=embed_cache_path,
+        )
     if args.subcommand in ("apply", "all"):
         cmd_apply(map_path=map_path, vault_root=vault_root, limit=args.limit, dry_run=args.dry_run)
     return 0

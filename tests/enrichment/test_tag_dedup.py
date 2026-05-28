@@ -100,7 +100,8 @@ def test_phase_b_llm_call_mocked():
     decisions = [{"pair_index": 1, "duplicate": True, "canonical": "anthropic"}]
     mock_response = _make_judge_response(decisions)
 
-    with patch.object(tag_dedup, "_get_client") as mock_get_client:
+    with patch.object(tag_dedup, "_get_client") as mock_get_client, \
+         patch.object(tag_dedup, "_embed_texts", side_effect=Exception("no embed")):
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -120,7 +121,8 @@ def test_phase_b_returns_pairs_decision():
     decisions = [{"pair_index": 1, "duplicate": True, "canonical": "anthropic"}]
     mock_response = _make_judge_response(decisions)
 
-    with patch.object(tag_dedup, "_get_client") as mock_get_client:
+    with patch.object(tag_dedup, "_get_client") as mock_get_client, \
+         patch.object(tag_dedup, "_embed_texts", side_effect=Exception("no embed")):
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_get_client.return_value = mock_client
