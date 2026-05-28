@@ -48,7 +48,13 @@ def init(db_path: Path, dim: int, force: bool) -> None:
     db_path.mkdir(parents=True, exist_ok=True)
     db = lancedb.connect(str(db_path))
 
-    existing = TABLE_NAME in db.table_names()
+    # `list_tables()` replaces the deprecated `table_names()`. Newer lancedb
+    # releases (0.20+) return a `ListTablesResponse` object exposing `.tables`,
+    # while older releases returned a plain `list[str]`. Handle both shapes
+    # so the script stays portable across version bumps.
+    tables = db.list_tables()
+    table_names = getattr(tables, "tables", tables)
+    existing = TABLE_NAME in table_names
     if existing and not force:
         print(f"[init_lancedb] table '{TABLE_NAME}' already exists at {db_path} — skipping (use --force to recreate)")
         return
