@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import json
-import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 import yaml
 
 from connecting_dots.enrichment import tag_dedup
@@ -17,7 +15,6 @@ from connecting_dots.enrichment.tag_dedup import (
     phase_b,
     phase_c,
     phase_d,
-    _rewrite_tags,
     _split_frontmatter,
 )
 
@@ -108,7 +105,7 @@ def test_phase_b_llm_call_mocked():
         mock_client.chat.completions.create.return_value = mock_response
         mock_get_client.return_value = mock_client
 
-        result = phase_b(tags, a_map, model="gpt-4.1")
+        phase_b(tags, a_map, model="gpt-4.1")
 
     # The LLM was called at least once
     assert mock_client.chat.completions.create.called
@@ -205,10 +202,10 @@ def test_phase_d_idempotent_on_rerun(tmp_path):
     _write_note(note, tags=["#entity/ai", "#source/email"])
 
     canonical_map = {"#entity/ai": "#entity/ai"}
-    counts1 = phase_d(tmp_path, canonical_map)
+    phase_d(tmp_path, canonical_map)
     text_after_first = note.read_text()
 
-    counts2 = phase_d(tmp_path, canonical_map)
+    phase_d(tmp_path, canonical_map)
     text_after_second = note.read_text()
 
     # Second run should not change anything (already canonical)
