@@ -415,6 +415,33 @@ def dispatch_envelope(
     """
     mt = envelope.message_type
 
+    if mt == MessageType.interactive:
+        # Digest reaction: extract row id from raw_payload (native WA structure).
+        raw = envelope.raw_payload or {}
+        interactive = raw.get("interactive", {})
+        itype = interactive.get("type", "")
+        if itype == "list_reply":
+            row_id = interactive.get("list_reply", {}).get("id", "")
+        elif itype == "button_reply":
+            row_id = interactive.get("button_reply", {}).get("id", "")
+        else:
+            row_id = ""
+
+        if row_id:
+            from connecting_dots.digest.labels import decode_row_id, write_label
+            decoded = decode_row_id(row_id)
+            if decoded is not None:
+                slug, reaction = decoded
+                user = str(raw.get("from", ""))
+                try:
+                    write_label(item_slug=slug, reaction=reaction, user=user)
+                    logger.info("[dispatch] digest reaction recorded slug=%s reaction=%s user=%s",
+                                slug, reaction, user)
+                except Exception:  # noqa: BLE001
+                    logger.exception("[dispatch] write_label failed slug=%s", slug)
+                return None
+            # row_id present but not a digest reaction — fall through to raw handler
+
     if mt == MessageType.url:
         # Existing URL-routing path, unchanged.
         return dispatch_url(

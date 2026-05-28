@@ -342,6 +342,63 @@ def test_dispatch_envelope_routes_document_with_filename(
     assert record.title == "WhatsApp document"
 
 
+# --------------------------------------------------------------------------- #
+# dispatch_envelope — interactive / digest reaction handling
+# --------------------------------------------------------------------------- #
+
+def _interactive_envelope(row_id: str, itype: str = "list_reply", from_num: str = "918595087697") -> InboundEnvelope:
+    """Build an interactive envelope with the WA native raw_payload structure."""
+    if itype == "list_reply":
+        interactive = {"type": "list_reply", "list_reply": {"id": row_id, "title": "👍"}}
+    else:
+        interactive = {"type": "button_reply", "button_reply": {"id": row_id, "title": "Yes"}}
+    return InboundEnvelope.model_validate({
+        "message_id": "wamid.interactive-test",
+        "message_type": "interactive",
+        "source": "whatsapp",
+        "captured_at": _now().isoformat(),
+        "raw_payload": {
+            "from": from_num,
+            "type": "interactive",
+            "interactive": interactive,
+        },
+    })
+
+
+def test_dispatch_envelope_interactive_digest_reaction_writes_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid digest row ID must call write_label with the correct slug/reaction/user."""
+    labels_file = tmp_path / "labels.jsonl"
+    monkeypatch.setenv("LABELS_DB", str(labels_file))
+
+    env = _interactive_envelope("sources/web/note.md__up")
+    result = dispatcher.dispatch_envelope(env)
+
+    assert result is None  # no NoteRecord for label writes
+    assert labels_file.exists()
+    import json
+    rows = [json.loads(line) for line in labels_file.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["item_slug"] == "sources/web/note.md"
+    assert rows[0]["reaction"] == "thumbs_up"
+    assert rows[0]["user"] == "918595087697"
+
+
+def test_dispatch_envelope_interactive_invalid_row_id_falls_through_to_raw(
+    captured_writes: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interactive envelope with a non-digest row ID must fall through to the raw handler."""
+    env = _interactive_envelope("some-regular-button-no-double-underscore", itype="button_reply")
+    result = dispatcher.dispatch_envelope(env)
+
+    # raw handler should have been called and written a record
+    assert result is not None
+    assert result.handler == "raw"
+
+
 def test_missing_handler_module_does_not_break_registry(
     monkeypatch: pytest.MonkeyPatch,
     captured_writes: list[dict[str, Any]],
