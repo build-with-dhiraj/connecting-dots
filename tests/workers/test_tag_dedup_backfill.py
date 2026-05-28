@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
 import yaml
 
 from workers import tag_dedup_backfill
@@ -73,7 +72,7 @@ def test_build_map_creates_cache(tmp_path):
     map_path = tmp_path / "map.json"
 
     with patch.object(tag_dedup_backfill, "_resolve_vault_root", return_value=vault):
-        result = cmd_build_map(
+        cmd_build_map(
             map_path=map_path,
             model="gpt-4.1",
             reuse_map=False,
