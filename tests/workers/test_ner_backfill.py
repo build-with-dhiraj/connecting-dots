@@ -218,7 +218,11 @@ def test_backfill_limit_caps_work(tmp_vault):
 
 
 def test_backfill_error_does_not_crash_loop(tmp_vault):
-    """A failing extraction marks the note and the loop continues."""
+    """A failing extraction marks the note and the loop continues.
+
+    Alphabetical iteration: boom.md is processed before ok.md, so call #1
+    raises (boom) and call #2 succeeds (ok).
+    """
     _write_note(tmp_vault / "sources" / "web" / "boom.md", title="boom", body="b")
     _write_note(tmp_vault / "sources" / "web" / "ok.md", title="ok", body="b")
 
@@ -237,13 +241,42 @@ def test_backfill_error_does_not_crash_loop(tmp_vault):
         rc = ner_backfill.main(["--limit", "10", "--concurrency", "1"])
 
     assert rc == 0
-    # One succeeded, the other was attempted (we don't assert which one given
-    # arbitrary iteration order vs concurrency=1 — alphabetical: boom then ok).
-    # Both notes should have ner_enriched_at set (the error path still records
-    # the timestamp so we don't retry the broken one forever).
     fm_boom, _ = _parse(tmp_vault / "sources" / "web" / "boom.md")
     fm_ok, _ = _parse(tmp_vault / "sources" / "web" / "ok.md")
-    assert fm_boom["raw_meta"].get("ner_enriched_at")
+    # The failed note must NOT have ner_enriched_at — otherwise the next
+    # sweep would permanently skip it. It must have ner_error set instead.
+    assert not fm_boom["raw_meta"].get("ner_enriched_at")
+    assert fm_boom["raw_meta"].get("ner_error")
+    # The successful note has the timestamp + entities populated.
     assert fm_ok["raw_meta"].get("ner_enriched_at")
-    # One of the two should have entities populated.
-    assert fm_boom["entities"] != [] or fm_ok["entities"] != []
+    assert fm_ok["entities"] == ["OK"]
+
+
+def test_backfill_retries_failed_note_on_next_sweep(tmp_vault):
+    """A note that errored once must be re-processed on the next sweep."""
+    _write_note(tmp_vault / "sources" / "web" / "flaky.md", title="flaky", body="b")
+
+    call_count = {"n": 0}
+
+    def _fail_then_succeed(**kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("transient API failure")
+        return _mock_response(["E"], ["t"])
+
+    with patch("connecting_dots.enrichment.ner._get_client") as get_client:
+        client = SimpleNamespace()
+        client.messages = SimpleNamespace(create=_fail_then_succeed)
+        get_client.return_value = client
+
+        ner_backfill.main(["--limit", "10", "--concurrency", "1"])
+        first_calls = call_count["n"]
+        ner_backfill.main(["--limit", "10", "--concurrency", "1"])
+        second_calls = call_count["n"]
+
+    assert first_calls == 1
+    assert second_calls == 2, "failed note must be retried on the next sweep"
+    fm, _ = _parse(tmp_vault / "sources" / "web" / "flaky.md")
+    assert fm["entities"] == ["E"]
+    assert fm["raw_meta"].get("ner_enriched_at")
+    assert "ner_error" not in fm["raw_meta"]

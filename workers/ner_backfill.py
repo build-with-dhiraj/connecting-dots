@@ -233,16 +233,23 @@ def _enrich_one_sync(note_path: Path, model: Optional[str], vault_root: Path) ->
     new_fm["entities"] = list(result.entities)
     new_fm["topics"] = list(result.topics)
     raw_meta = dict(new_fm.get("raw_meta") or {})
-    raw_meta["ner_enriched_at"] = _now_iso()
-    raw_meta["ner_model"] = model or os.environ.get("NER_MODEL") or "claude-haiku-4-5"
-    # Pop a prior error if this run succeeded; record one if it failed.
-    raw_meta.pop("ner_error", None)
+    if result.error:
+        # Failed extraction: record the error but do NOT stamp ner_enriched_at /
+        # ner_model. The note must remain eligible for retry on the next sweep.
+        raw_meta["ner_error"] = result.error[:500]
+    else:
+        raw_meta["ner_enriched_at"] = _now_iso()
+        raw_meta["ner_model"] = model or os.environ.get("NER_MODEL") or "claude-haiku-4-5"
+        raw_meta.pop("ner_error", None)
     new_fm["raw_meta"] = raw_meta
 
     try:
         _write_note_atomic(note_path, new_fm, body)
     except OSError as e:
         return {"status": "write_error", "path": rel, "error": str(e)}
+
+    if result.error:
+        return {"status": "error", "path": rel, "error": result.error}
 
     return {
         "status": "ok",

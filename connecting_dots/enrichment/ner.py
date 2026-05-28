@@ -214,6 +214,7 @@ class NERResult:
     output_tokens: int = 0
     cached_input_tokens: int = 0
     cache_creation_tokens: int = 0
+    error: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -353,6 +354,7 @@ def extract(
         output_tokens=out_tokens,
         cached_input_tokens=cached_in,
         cache_creation_tokens=cache_create,
+        error=error,
     )
 
 
