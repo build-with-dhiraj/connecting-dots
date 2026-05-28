@@ -57,6 +57,14 @@
       "type": "string",
       "description": "Free-text body. For `message_type == \"text\"` this is the message body. For image/video/document this is the user-supplied caption (may be empty). For `location` this is `\"<lat>,<lon>\"` plus optional address."
     },
+    "interactive_id": {
+      "type": "string",
+      "description": "Row/button ID from a WhatsApp interactive reply (digest reaction). Format `<slug>__<short_reaction>` where short_reaction in {up, shrug, down}. Present only for `message_type == \"interactive\"`."
+    },
+    "interactive_title": {
+      "type": "string",
+      "description": "Human-readable button/row label the user tapped (e.g. `👍 Loved it`). Present only for `message_type == \"interactive\"`. Informational only."
+    },
     "source": {
       "type": "string",
       "enum": ["whatsapp", "mailto", "linkedin", "manual"],

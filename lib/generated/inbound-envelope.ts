@@ -53,11 +53,11 @@ export interface InboundEnvelope {
    */
   text?: string;
   /**
-   * For `message_type == "interactive"`: the ID of the selected list row or button. Encodes `<slug>__<reaction>` for digest reactions.
+   * Row/button ID from a WhatsApp interactive reply (digest reaction). Format `<slug>__<short_reaction>` where short_reaction in {up, shrug, down}. Present only for `message_type == "interactive"`.
    */
   interactive_id?: string;
   /**
-   * For `message_type == "interactive"`: the display title of the selected row/button.
+   * Human-readable button/row label the user tapped (e.g. `👍 Loved it`). Present only for `message_type == "interactive"`. Informational only.
    */
   interactive_title?: string;
   /**
