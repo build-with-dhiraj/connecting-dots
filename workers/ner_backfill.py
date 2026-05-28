@@ -38,8 +38,8 @@ Concurrency
 -----------
 
 Up to `NER_CONCURRENCY` (env, default 4) extractions run in flight
-concurrently via `asyncio.to_thread()` — the `anthropic` SDK's sync client
-is thread-safe and releases the GIL during HTTP, so we get real overlap.
+concurrently via `asyncio.to_thread()` — the `openai` SDK's sync `AzureOpenAI`
+client is thread-safe and releases the GIL during HTTP, so we get real overlap.
 Each note's frontmatter rewrite is its own atomic tmp+rename so concurrent
 workers can't collide on disk.
 """
@@ -239,7 +239,7 @@ def _enrich_one_sync(note_path: Path, model: Optional[str], vault_root: Path) ->
         raw_meta["ner_error"] = result.error[:500]
     else:
         raw_meta["ner_enriched_at"] = _now_iso()
-        raw_meta["ner_model"] = model or os.environ.get("NER_MODEL") or "claude-haiku-4-5"
+        raw_meta["ner_model"] = model or os.environ.get("NER_MODEL") or "gpt-4.1"
         raw_meta.pop("ner_error", None)
     new_fm["raw_meta"] = raw_meta
 
@@ -320,7 +320,7 @@ def _one_shot_sweep(limit: Optional[int], concurrency: int, model: Optional[str]
         len(all_paths),
         vault_root,
         concurrency,
-        model or os.environ.get("NER_MODEL") or "claude-haiku-4-5",
+        model or os.environ.get("NER_MODEL") or "gpt-4.1",
     )
     return asyncio.run(
         _run_batch(all_paths, concurrency=concurrency, model=model, vault_root=vault_root)
@@ -386,7 +386,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--model",
         default=None,
-        help="Override NER_MODEL env var (default: claude-haiku-4-5).",
+        help="Override NER_MODEL env var (default: gpt-4.1 Azure deployment).",
     )
     parser.add_argument(
         "--watch",

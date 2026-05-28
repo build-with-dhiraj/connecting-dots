@@ -18,7 +18,7 @@ from .writer import stable_id, write_note
 def enqueue_for_enrichment(path):  # type: ignore[no-untyped-def]
     """Append `path` to the NER enrichment queue.
 
-    Lazy import keeps the enrichment package (and its `anthropic` dep) out of
+    Lazy import keeps the enrichment package (and its `openai` dep) out of
     the vault_writer's import graph — callers that don't enable enrichment
     pay zero startup cost.
     """

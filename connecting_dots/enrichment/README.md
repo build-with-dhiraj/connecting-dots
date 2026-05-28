@@ -14,17 +14,21 @@ scorer (#13). Garbage in → garbage edges → garbage resurfacing. Quality matt
 
 ## How it works
 
-`connecting_dots.enrichment.ner.extract(...)` calls the Claude API with:
+`connecting_dots.enrichment.ner.extract(...)` calls the Azure OpenAI Chat
+Completions API (model: `gpt-4.1`) with:
 
-1. **Tool-use mode.** A single tool `record_extraction(entities, topics)` with
-   a strict `input_schema`. The model can only respond by calling this tool —
-   no free-text JSON to regex-parse.
-2. **Prompt caching.** The system prompt + few-shot examples (~2k tokens) sit
-   behind a `cache_control: {"type": "ephemeral"}` breakpoint on the last
-   system block. Render order is `tools` → `system` → `messages`, so the tool
-   definition is cached alongside the system prompt. The per-note content
-   goes in `messages` *after* the breakpoint, so it never invalidates the
-   cached prefix. Effective savings: ~70% across the backfill.
+1. **Function calling.** A single function `record_extraction(entities, topics)`
+   with a strict JSON Schema. `tool_choice` is pinned to that function so the
+   model can only respond by calling it — no free-text JSON to regex-parse.
+2. **Automatic prompt-prefix caching.** Azure OpenAI caches the leading
+   messages automatically when the same prefix repeats across calls. There is
+   no `cache_control` flag to set (unlike Anthropic). The contract is simply
+   that `messages[0]` (the system prompt + few-shot examples, ~2k tokens) is
+   byte-identical across every call. Per-note variable content sits in
+   `messages[1]` (the user message), after the stable prefix, so it never
+   invalidates the cache. Cache hits surface as
+   `response.usage.prompt_tokens_details.cached_tokens` and are billed at 50%
+   of the normal input rate.
 3. **Body truncation.** Bodies are truncated to 4000 chars to bound cost on
    long YouTube transcripts. The first 4000 chars is more than enough to
    identify entities and topics — title + intro carries most of the signal.
@@ -32,9 +36,25 @@ scorer (#13). Garbage in → garbage edges → garbage resurfacing. Quality matt
    before frontmatter writeback. Low-confidence entries still appear in the
    trace's raw payload for debugging.
 
-Default model: `claude-haiku-4-5`. Override via `NER_MODEL` env var. Upgrade
-path to `claude-sonnet-4-6` if Haiku quality is insufficient (the judge gold
-set in `tests/enrichment/test_judge.py` will tell you — F1 < 0.70 fails CI).
+Default deployment name: `gpt-4.1`. Override via `NER_MODEL` env var (or
+`AZURE_OPENAI_DEPLOYMENT`). The judge gold set in
+`tests/enrichment/test_judge.py` will tell you if a model swap drops quality
+below the F1 ≥ 0.70 floor.
+
+## Environment
+
+```
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_DEPLOYMENT=gpt-4.1
+AZURE_OPENAI_API_VERSION=preview      # or a dated version like 2024-12-01-preview
+NER_MODEL=gpt-4.1
+NER_CONCURRENCY=4
+```
+
+The deployment must exist in Azure Portal. `AZURE_OPENAI_API_VERSION=preview`
+follows the rolling v1 preview surface; pin to a dated version if you want
+strict reproducibility.
 
 ## Observability — local JSONL only
 
@@ -44,10 +64,10 @@ Every extraction call appends one JSON line to `data/ner_traces.jsonl`:
 {
   "timestamp": "2026-05-28T12:00:00Z",
   "vault_path": "sources/youtube/some-video.md",
-  "model": "claude-haiku-4-5",
-  "input_tokens": 1234,
+  "model": "gpt-4.1",
+  "input_tokens": 2300,
   "output_tokens": 56,
-  "cached_input_tokens": 1100,
+  "cached_input_tokens": 1800,
   "cost_usd": 0.001234,
   "entities_count": 7,
   "topics_count": 3,
@@ -55,6 +75,12 @@ Every extraction call appends one JSON line to `data/ner_traces.jsonl`:
   "error": null
 }
 ```
+
+Note: on OpenAI/Azure the `input_tokens` field is the **total** prompt token
+count (cached + uncached), which mirrors `response.usage.prompt_tokens`. The
+`cached_input_tokens` subset comes from `prompt_tokens_details.cached_tokens`.
+The pricing math in `tracer.py` charges `(input - cached) * input_rate +
+cached * cached_rate + output * output_rate`.
 
 **No langfuse.** No cloud observability vendor is wired in. This is a
 single-user personal-knowledge system; vault contents already leave the
@@ -65,7 +91,7 @@ third-party tracing service buys nothing useful for a one-user system.
 ## Running the backfill
 
 ```bash
-# Sanity check on a small batch first — costs ~$0.005 with cached prefix.
+# Sanity check on a small batch first — costs ~$0.01 with cached prefix.
 .venv/bin/python -m workers.ner_backfill --limit 5
 
 # Inspect data/ner_traces.jsonl, eyeball a few notes' frontmatter, then:
@@ -80,23 +106,27 @@ Idempotency: a note is skipped if it already has non-empty `entities` OR if
 
 ## Expected cost
 
-Full backfill of 1,464 notes at Haiku 4.5 pricing with prompt caching:
-- First call: ~2k tokens prefix written to cache (~$0.0025) + per-note variable
-  content (~500 tokens, ~$0.0005) + ~100 tokens output (~$0.0005) = ~$0.0035.
-- Subsequent calls (cache hit): ~2k cached input ($0.0002) + ~500 variable
-  ($0.0005) + ~100 output ($0.0005) = ~$0.0012/note.
-- Total: ~$0.0035 + 1463 × $0.0012 ≈ **$1.75 - $2.50**.
+Full backfill of 1,464 notes at Azure gpt-4.1 pricing
+(input $2.00 / 1M, cached input $1.00 / 1M, output $8.00 / 1M) with automatic
+prompt-prefix caching:
+
+- First call: ~2000 tokens prefix uncached + ~500 variable + ~100 output
+  ≈ (2500 × 2.00 + 100 × 8.00) / 1M ≈ $0.0058.
+- Subsequent calls (cache hit on ~2000-token prefix): 2000 cached at $1.00/1M
+  + ~500 fresh at $2.00/1M + ~100 output at $8.00/1M
+  ≈ (2000 × 1.00 + 500 × 2.00 + 100 × 8.00) / 1M ≈ $0.0038/note.
+- Total: ~$0.006 + 1463 × $0.0038 ≈ **$3.50 – $4.00**.
 
 A worst-case run without cache hits (every call a fresh prefix — happens if
-the system prompt is edited between calls) would be ~$5-7. Watch the
-`cached_input_tokens` column in `data/ner_traces.jsonl` — if it's zero, the
-prompt prefix is being invalidated somewhere (see `shared/prompt-caching.md`
-silent-invalidator audit).
+the system prompt is edited between calls) would be ~$6-7. Watch the
+`cached_input_tokens` column in `data/ner_traces.jsonl` — if it's zero on
+calls 2..N, the prompt prefix is being invalidated somewhere (see
+`shared/prompt-caching.md` silent-invalidator audit).
 
 ## Inline enrichment for new notes
 
 The vault writer (`lib/vault_writer/writer.py`) is called synchronously from
-the stream consumer. Adding a 2-3s Claude call to that hot path would
+the stream consumer. Adding a 2-3s Azure OpenAI call to that hot path would
 back-pressure the consumer and bound ingest QPS to extractor throughput.
 
 Instead, the consumer (optionally) appends the written path to

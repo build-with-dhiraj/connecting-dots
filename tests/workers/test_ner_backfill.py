@@ -66,29 +66,43 @@ def _parse(path: Path) -> tuple[dict, str]:
 
 
 # --------------------------------------------------------------------------- #
-# Mocked Anthropic client
+# Mocked Azure OpenAI client
 # --------------------------------------------------------------------------- #
 def _mock_response(entities: list[str], topics: list[str]):
+    import json as _json
+
+    payload = {
+        "entities": [
+            {"name": e, "type": "concept", "confidence": 0.95} for e in entities
+        ],
+        "topics": topics,
+    }
     return SimpleNamespace(
-        content=[
+        choices=[
             SimpleNamespace(
-                type="tool_use",
-                name="record_extraction",
-                id="toolu_1",
-                input={
-                    "entities": [
-                        {"name": e, "type": "concept", "confidence": 0.95}
-                        for e in entities
+                index=0,
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_1",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="record_extraction",
+                                arguments=_json.dumps(payload),
+                            ),
+                        )
                     ],
-                    "topics": topics,
-                },
+                ),
             )
         ],
         usage=SimpleNamespace(
-            input_tokens=100,
-            output_tokens=20,
-            cache_read_input_tokens=0,
-            cache_creation_input_tokens=1500,
+            prompt_tokens=1600,
+            completion_tokens=20,
+            total_tokens=1620,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
         ),
     )
 
@@ -116,8 +130,10 @@ def test_backfill_populates_entities_and_topics(tmp_vault, monkeypatch):
 
     with patch("connecting_dots.enrichment.ner._get_client") as get_client:
         client = SimpleNamespace()
-        client.messages = SimpleNamespace(
-            create=lambda **kw: _mock_response(["X", "Y"], ["topic-a"])
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kw: _mock_response(["X", "Y"], ["topic-a"])
+            )
         )
         get_client.return_value = client
         rc = ner_backfill.main(["--limit", "10", "--concurrency", "2"])
@@ -129,7 +145,7 @@ def test_backfill_populates_entities_and_topics(tmp_vault, monkeypatch):
         assert fm["entities"] == ["X", "Y"], f"{rel} not enriched"
         assert fm["topics"] == ["topic-a"]
         assert fm["raw_meta"]["ner_enriched_at"]  # ISO timestamp
-        assert fm["raw_meta"]["ner_model"] == "claude-haiku-4-5"
+        assert fm["raw_meta"]["ner_model"] == "gpt-4.1"
 
 
 def test_backfill_is_idempotent(tmp_vault):
@@ -144,7 +160,7 @@ def test_backfill_is_idempotent(tmp_vault):
 
     with patch("connecting_dots.enrichment.ner._get_client") as get_client:
         client = SimpleNamespace()
-        client.messages = SimpleNamespace(create=_record_call)
+        client.chat = SimpleNamespace(completions=SimpleNamespace(create=_record_call))
         get_client.return_value = client
 
         ner_backfill.main(["--limit", "10"])
@@ -168,8 +184,10 @@ def test_backfill_skips_already_populated(tmp_vault):
     call_count = {"n": 0}
     with patch("connecting_dots.enrichment.ner._get_client") as get_client:
         client = SimpleNamespace()
-        client.messages = SimpleNamespace(
-            create=lambda **kw: (call_count.update(n=call_count["n"] + 1) or _mock_response([], []))
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kw: (call_count.update(n=call_count["n"] + 1) or _mock_response([], []))
+            )
         )
         get_client.return_value = client
         ner_backfill.main(["--limit", "10"])
@@ -190,8 +208,10 @@ def test_backfill_skips_failed_directory_and_example(tmp_vault):
     call_count = {"n": 0}
     with patch("connecting_dots.enrichment.ner._get_client") as get_client:
         client = SimpleNamespace()
-        client.messages = SimpleNamespace(
-            create=lambda **kw: (call_count.update(n=call_count["n"] + 1) or _mock_response(["E"], ["t"]))
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kw: (call_count.update(n=call_count["n"] + 1) or _mock_response(["E"], ["t"]))
+            )
         )
         get_client.return_value = client
         ner_backfill.main(["--limit", "10"])
@@ -208,8 +228,10 @@ def test_backfill_limit_caps_work(tmp_vault):
     call_count = {"n": 0}
     with patch("connecting_dots.enrichment.ner._get_client") as get_client:
         client = SimpleNamespace()
-        client.messages = SimpleNamespace(
-            create=lambda **kw: (call_count.update(n=call_count["n"] + 1) or _mock_response(["E"], []))
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kw: (call_count.update(n=call_count["n"] + 1) or _mock_response(["E"], []))
+            )
         )
         get_client.return_value = client
         ner_backfill.main(["--limit", "3"])
@@ -236,7 +258,9 @@ def test_backfill_error_does_not_crash_loop(tmp_vault):
 
     with patch("connecting_dots.enrichment.ner._get_client") as get_client:
         client = SimpleNamespace()
-        client.messages = SimpleNamespace(create=_raises_then_works)
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=_raises_then_works)
+        )
         get_client.return_value = client
         rc = ner_backfill.main(["--limit", "10", "--concurrency", "1"])
 
@@ -266,7 +290,9 @@ def test_backfill_retries_failed_note_on_next_sweep(tmp_vault):
 
     with patch("connecting_dots.enrichment.ner._get_client") as get_client:
         client = SimpleNamespace()
-        client.messages = SimpleNamespace(create=_fail_then_succeed)
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=_fail_then_succeed)
+        )
         get_client.return_value = client
 
         ner_backfill.main(["--limit", "10", "--concurrency", "1"])

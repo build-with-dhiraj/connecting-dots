@@ -10,7 +10,7 @@ Schema (per line):
     {
       "timestamp": "2026-05-28T12:00:00Z",
       "vault_path": "sources/youtube/some-video.md",
-      "model": "claude-haiku-4-5",
+      "model": "gpt-4.1",
       "input_tokens": 1234,
       "output_tokens": 56,
       "cached_input_tokens": 1100,
@@ -22,12 +22,12 @@ Schema (per line):
     }
 
 `cost_usd` is computed from the constants table below. Update the numbers
-when Anthropic's published rates change; the test suite asserts the math
+when Azure OpenAI's published rates change; the test suite asserts the math
 rather than the absolute number so a price update only touches one place.
 
 Deliberately NOT using `langfuse` — this is a single-user system and vault
-contents already go to Anthropic for the extraction itself; piping them to
-a third observability vendor adds nothing.
+contents already go to Azure OpenAI for the extraction itself; piping them
+to a third observability vendor adds nothing.
 """
 from __future__ import annotations
 
@@ -44,32 +44,28 @@ _DEFAULT_TRACES_PATH = Path(__file__).resolve().parent.parent.parent / "data" / 
 
 
 # --------------------------------------------------------------------------- #
-# Pricing table — Anthropic published rates (USD per 1M tokens)
-# Source: https://docs.anthropic.com/en/docs/about-claude/pricing
-# Update here when rates change. The "cached" rate applies to
-# cache_read_input_tokens (the cached prefix that hits on subsequent calls).
+# Pricing table — Azure OpenAI published rates (USD per 1M tokens).
+# Source: https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/
+# Update here when rates change. The "cached_input" rate applies to tokens
+# served from Azure's automatic prompt-prefix cache (50% of input price).
+# Azure OpenAI does NOT have a separate cache-write charge — writes are billed
+# at the normal input rate — so we leave `cache_write` equal to `input`.
 # --------------------------------------------------------------------------- #
+_GPT_4_1_PRICING = {
+    "input_per_1m_usd": 2.00,
+    "cached_input_per_1m_usd": 1.00,  # Azure auto-cache reads = 50% of input
+    "output_per_1m_usd": 8.00,
+}
+
 _PRICING_PER_1M: dict[str, dict[str, float]] = {
-    # Haiku 4.5
-    "claude-haiku-4-5": {
-        "input": 1.00,
-        "output": 5.00,
-        "cached_input": 0.10,  # ~10% of input price
-        "cache_write": 1.25,   # ~1.25x input price for 5-min TTL writes
-    },
-    # Sonnet 4.6 — upgrade path if Haiku quality is insufficient
-    "claude-sonnet-4-6": {
-        "input": 3.00,
-        "output": 15.00,
-        "cached_input": 0.30,
-        "cache_write": 3.75,
-    },
-    # Opus 4.7 — unlikely for NER but supported for symmetry
-    "claude-opus-4-7": {
-        "input": 5.00,
-        "output": 25.00,
-        "cached_input": 0.50,
-        "cache_write": 6.25,
+    # gpt-4.1 — primary model. The deployment name on Azure is conventionally
+    # also "gpt-4.1"; we key on that. If the user names their Azure deployment
+    # differently, set NER_MODEL accordingly and add a row here.
+    "gpt-4.1": {
+        "input": _GPT_4_1_PRICING["input_per_1m_usd"],
+        "output": _GPT_4_1_PRICING["output_per_1m_usd"],
+        "cached_input": _GPT_4_1_PRICING["cached_input_per_1m_usd"],
+        "cache_write": _GPT_4_1_PRICING["input_per_1m_usd"],
     },
 }
 

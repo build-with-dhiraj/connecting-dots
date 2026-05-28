@@ -35,7 +35,7 @@ def test_append_creates_parent_dir_and_file(traces_path):
     append_trace(
         Trace(
             vault_path="sources/web/x.md",
-            model="claude-haiku-4-5",
+            model="gpt-4.1",
             input_tokens=100,
             output_tokens=20,
             cached_input_tokens=0,
@@ -59,7 +59,7 @@ def test_append_multiple_records_one_per_line(traces_path):
         append_trace(
             Trace(
                 vault_path=f"x{i}.md",
-                model="claude-haiku-4-5",
+                model="gpt-4.1",
                 input_tokens=10 * i,
                 output_tokens=2,
                 cached_input_tokens=0,
@@ -84,7 +84,7 @@ def test_concurrent_appends_produce_intact_lines(traces_path):
             append_trace(
                 Trace(
                     vault_path=f"t{idx}-{j}.md",
-                    model="claude-haiku-4-5",
+                    model="gpt-4.1",
                     input_tokens=j,
                     output_tokens=1,
                     cached_input_tokens=0,
@@ -111,50 +111,51 @@ def test_concurrent_appends_produce_intact_lines(traces_path):
 # --------------------------------------------------------------------------- #
 # Cost math
 # --------------------------------------------------------------------------- #
-def test_cost_haiku_45_full_input_output():
-    # 1M input tokens at $1.00 = $1.00. 1M output at $5.00 = $5.00. Total $6.00.
+def test_cost_gpt_4_1_full_input_output():
+    # 1M input tokens at $2.00 = $2.00. 1M output at $8.00 = $8.00. Total $10.00.
     cost = compute_cost_usd(
-        model="claude-haiku-4-5",
+        model="gpt-4.1",
         input_tokens=1_000_000,
         output_tokens=1_000_000,
     )
-    assert cost == pytest.approx(6.0)
+    assert cost == pytest.approx(10.0)
 
 
-def test_cost_haiku_45_with_cache_hit():
-    # 100 fresh input + 900 cached + 50 output, at Haiku 4.5:
-    # input  : 100   * 1.00/1M    = $0.0001
-    # cached : 900   * 0.10/1M    = $0.00009
-    # output : 50    * 5.00/1M    = $0.00025
-    # total                       = $0.00044
+def test_cost_gpt_4_1_with_cache_hit():
+    # gpt-4.1 on Azure: input $2.00/1M, cached $1.00/1M, output $8.00/1M.
+    # 100 fresh input + 900 cached + 50 output:
+    # input  : 100  * 2.00/1M  = $0.0002
+    # cached : 900  * 1.00/1M  = $0.0009
+    # output : 50   * 8.00/1M  = $0.0004
+    # total                    = $0.0015
     cost = compute_cost_usd(
-        model="claude-haiku-4-5",
+        model="gpt-4.1",
         input_tokens=100,
         output_tokens=50,
         cached_input_tokens=900,
     )
-    assert cost == pytest.approx(0.00044, abs=1e-6)
+    assert cost == pytest.approx(0.0015, abs=1e-6)
 
 
 def test_cost_unknown_model_returns_zero():
     cost = compute_cost_usd(
-        model="claude-unknown-99-0",
+        model="some-unknown-model-99-0",
         input_tokens=1_000_000,
         output_tokens=1_000_000,
     )
     assert cost == 0.0
 
 
-def test_cost_cache_creation_charged_higher_than_input():
-    """Cache writes are billed at ~1.25x input price for the 5-min TTL."""
-    # Just write 1M to cache, nothing else.
+def test_cost_cache_read_is_half_of_input():
+    """Azure's automatic prompt-prefix cache reads are billed at 50% of the
+    input rate. 1M cached reads at gpt-4.1 = $1.00."""
     cost = compute_cost_usd(
-        model="claude-haiku-4-5",
+        model="gpt-4.1",
         input_tokens=0,
         output_tokens=0,
-        cache_creation_tokens=1_000_000,
+        cached_input_tokens=1_000_000,
     )
-    assert cost == pytest.approx(1.25)
+    assert cost == pytest.approx(1.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +164,7 @@ def test_cost_cache_creation_charged_higher_than_input():
 def test_trace_auto_populates_timestamp():
     t = Trace(
         vault_path="x.md",
-        model="claude-haiku-4-5",
+        model="gpt-4.1",
         input_tokens=1,
         output_tokens=1,
         cached_input_tokens=0,

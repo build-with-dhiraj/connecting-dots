@@ -1,14 +1,14 @@
 """LLM-as-judge gold set test for the NER extractor.
 
-This test mocks the Claude API call and feeds the extractor synthetic
-"realistic-quality" responses for each item in `gold_set.json`. The judge
-then grades the parsed extractor output against the gold expectations using
-set-based P/R/F1 (see `connecting_dots.enrichment.judge`).
+This test mocks the Azure OpenAI chat-completion call and feeds the extractor
+synthetic "realistic-quality" responses for each item in `gold_set.json`. The
+judge then grades the parsed extractor output against the gold expectations
+using set-based P/R/F1 (see `connecting_dots.enrichment.judge`).
 
-**Why not hit live Claude in the test?** This test runs in CI on every
+**Why not hit live Azure OpenAI in the test?** This test runs in CI on every
 commit and a live-API test would: (a) cost money per CI run, (b) make tests
-flaky when Anthropic has any blip, (c) couple the test pass/fail to model
-weight updates. The live-API smoke test is the `python -m workers.ner_backfill
+flaky when Azure has any blip, (c) couple the test pass/fail to model weight
+updates. The live-API smoke test is the `python -m workers.ner_backfill
 --limit 3` step we run by hand before merging — it's documented in the
 enrichment README but kept out of the unit test suite.
 
@@ -31,7 +31,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from connecting_dots.enrichment import ner
+from connecting_dots.enrichment import ner  # noqa: F401 — re-exported below
 from connecting_dots.enrichment.judge import aggregate, grade_one
 
 GOLD_PATH = Path(__file__).parent / "gold_set.json"
@@ -85,19 +85,31 @@ def _simulate_extraction(item: dict) -> dict:
 def _build_mock_response(item: dict):
     sim = _simulate_extraction(item)
     return SimpleNamespace(
-        content=[
+        choices=[
             SimpleNamespace(
-                type="tool_use",
-                name="record_extraction",
-                id="toolu_test",
-                input=sim,
+                index=0,
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_test",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="record_extraction",
+                                arguments=json.dumps(sim),
+                            ),
+                        )
+                    ],
+                ),
             )
         ],
         usage=SimpleNamespace(
-            input_tokens=1500,
-            output_tokens=50,
-            cache_read_input_tokens=1800,
-            cache_creation_input_tokens=0,
+            prompt_tokens=2300,
+            completion_tokens=50,
+            total_tokens=2350,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=1800),
         ),
     )
 
@@ -120,7 +132,7 @@ def test_extractor_meets_quality_floor_on_gold_set(gold_items, tmp_path, monkeyp
     per_item = []
     for item in gold_items:
         client = MagicMock()
-        client.messages.create.return_value = _build_mock_response(item)
+        client.chat.completions.create.return_value = _build_mock_response(item)
         result = ner.extract(
             title=item["title"],
             body=item["text"],
