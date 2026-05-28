@@ -286,7 +286,7 @@ describe("POST /api/webhooks/whatsapp — interactive digest reactions", () => {
     expect(res.status).toBe(200);
   });
 
-  it("does NOT forward digest reactions to xadd (labels handled locally)", async () => {
+  it("forwards digest reactions to xadd so the local Python consumer can write labels", async () => {
     const rowId = "sources/web/note.md__shrug";
     const body = JSON.stringify(makeInteractivePayload(rowId));
     await POST(
@@ -297,8 +297,8 @@ describe("POST /api/webhooks/whatsapp — interactive digest reactions", () => {
         headers: { "x-hub-signature-256": sign(body) },
       }),
     );
-    // digest reactions should NOT be forwarded to the redis stream
-    expect(xaddMock).not.toHaveBeenCalled();
+    // digest reactions must now be forwarded to the redis stream (Python consumer writes labels)
+    expect(xaddMock).toHaveBeenCalledTimes(1);
   });
 
   it("forwards non-digest interactive messages to xadd normally", async () => {

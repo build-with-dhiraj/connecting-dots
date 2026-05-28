@@ -14,8 +14,6 @@
  *   sustained failures. Heavy work belongs in component #2 (queue/dispatcher).
  */
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { verifyMetaSignature } from "@/lib/wa-signature";
 import {
@@ -102,24 +100,6 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        // Handle digest reaction replies: interactive list_reply with a row ID
-        // encoding "<slug>__<reaction>". Write to data/labels.jsonl directly
-        // (local deployment — Option A, no Vercel cron / Upstash for labels).
-        if (env.message_type === "interactive" && env.interactive_id) {
-          const handled = await _handleDigestReaction(
-            env.interactive_id,
-            m.from,
-            env.captured_at,
-          );
-          if (handled) {
-            console.log("[wa/webhook] digest reaction recorded", {
-              messageId: m.messageId,
-              interactiveId: env.interactive_id,
-            });
-            return; // reaction handled — no need to dispatch to stream
-          }
-        }
-
         await dispatchInboundMessage(env);
       } catch (err) {
         console.error("[wa/webhook] dispatch failed", { messageId: m.messageId, err: String(err) });
@@ -130,59 +110,3 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true });
 }
 
-/**
- * Attempt to parse a digest reaction from an interactive list row ID.
- *
- * Row ID format: "<slug>__<short_reaction>" where short_reaction in {up, shrug, down}.
- * Writes a row to data/labels.jsonl.
- *
- * Returns true if the row ID was a valid digest reaction (even if the write failed),
- * so the caller can skip normal dispatch. Returns false if the ID doesn't match the
- * digest reaction format (caller should dispatch normally).
- *
- * This function is intentionally async-safe and never throws — errors are logged only.
- */
-async function _handleDigestReaction(
-  rowId: string,
-  from: string,
-  capturedAt: string,
-): Promise<boolean> {
-  const SEP = "__";
-  const idx = rowId.lastIndexOf(SEP);
-  if (idx === -1) return false;
-
-  const slug = rowId.slice(0, idx);
-  const short = rowId.slice(idx + SEP.length);
-
-  const REACTION_MAP: Record<string, string> = {
-    up: "thumbs_up",
-    shrug: "shrug",
-    down: "thumbs_down",
-  };
-  const reaction = REACTION_MAP[short];
-  if (!reaction || !slug) return false;
-
-  // Write to data/labels.jsonl. On Vercel this would be /tmp; locally it's data/.
-  const labelsDir =
-    process.env.VERCEL === "1"
-      ? "/tmp"
-      : path.resolve(process.cwd(), "data");
-  const labelsFile = path.join(labelsDir, "labels.jsonl");
-
-  try {
-    await fs.mkdir(labelsDir, { recursive: true });
-    const row = JSON.stringify({
-      timestamp: capturedAt,
-      item_slug: slug,
-      reaction,
-      user: from,
-    });
-    await fs.appendFile(labelsFile, row + "\n", "utf8");
-    console.log("[wa/webhook] label written", { slug, reaction, user: from });
-  } catch (err) {
-    console.error("[wa/webhook] label write failed", { err: String(err), slug, reaction });
-    // Still return true — we identified this as a digest reaction, just couldn't persist it.
-  }
-
-  return true;
-}
