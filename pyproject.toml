@@ -19,6 +19,9 @@ dependencies = [
     "trafilatura>=2.0",
     # LanceDB sidecar index (scripts/init_lancedb.py + future retrieval layer).
     "lancedb>=0.13",
+    # WhatsApp Export Chat ZIP watcher — used to parse iOS/Android timestamp
+    # strings in `_chat.txt` (locale ambiguity: DD/MM/YYYY vs MM/DD/YYYY).
+    "python-dateutil>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +37,7 @@ dev = [
 mailto-poller = "workers.mailto_poller:run_forever"
 stream-consumer = "workers.stream_consumer:run_forever"
 linkedin-zip-watcher = "workers.linkedin_zip_watcher:run_forever"
+whatsapp-export-watcher = "workers.whatsapp_export_watcher:run_forever"
 
 [build-system]
 requires = ["setuptools>=68"]
