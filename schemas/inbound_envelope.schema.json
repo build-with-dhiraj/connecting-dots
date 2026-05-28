@@ -49,6 +49,10 @@
       "type": "string",
       "description": "Original filename for `message_type == \"document\"` (Meta's `messages[].document.filename`). Absent for other types."
     },
+    "local_media_path": {
+      "type": "string",
+      "description": "Absolute filesystem path to a media file that has already been materialised locally. Used by the WhatsApp Export Chat backfill watcher (`workers/whatsapp_export_watcher.py`) which extracts media from the export ZIP onto disk before dispatch. Live WhatsApp envelopes leave this null — their media bytes live on Meta servers and are fetched later by component #5 via `media_id`."
+    },
     "text": {
       "type": "string",
       "description": "Free-text body. For `message_type == \"text\"` this is the message body. For image/video/document this is the user-supplied caption (may be empty). For `location` this is `\"<lat>,<lon>\"` plus optional address."

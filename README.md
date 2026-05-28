@@ -15,6 +15,7 @@ if WhatsApp Meta verification stalls.
 - **#5 Web/PDF handler** — TBD
 - **#6 mailto IMAP fallback** — `workers/mailto_poller.py` (this doc)
 - **#7 LinkedIn ZIP watcher** — `workers/linkedin_zip_watcher.py` (this doc)
+- **#8 WhatsApp self-DM Export Chat watcher** — `workers/whatsapp_export_watcher.py` (this doc)
 
 ## Upstash Redis Stream bridge — setup runbook
 
@@ -298,3 +299,95 @@ macOS FSEvents and Linux inotify both have quirks around files that are
 move-renamed into a directory (atomic vs non-atomic). A 60-second
 `os.scandir` poll is dead-simple, kills no batteries, and a monthly drop
 doesn't need sub-second latency.
+
+## WhatsApp self-DM backfill (Export Chat ZIP) — setup runbook
+
+The live WhatsApp Cloud API webhook only delivers messages received
+*after* the integration is wired up. To backfill years of saved links,
+images, voice notes, and PDFs you've been DM'ing to yourself, use
+WhatsApp's in-app **Export Chat (with Media)** feature on the "Message
+yourself" chat and drop the resulting ZIP into the watched folder.
+
+### 1. Export the self-DM from WhatsApp
+
+On your phone:
+
+1. Open WhatsApp → tap your own chat (the **Message yourself** /
+   self-DM chat).
+2. Tap the contact name at the top → scroll down → **Export Chat**.
+   (Android: ⋮ menu → More → Export chat.)
+3. Choose **Attach Media**. The export will be larger but will include
+   every image / voice note / PDF — exactly the corpus we want.
+4. WhatsApp creates a ZIP and offers a share sheet. Save it to Files /
+   Drive / email it to yourself — whatever gets it onto the laptop.
+
+### 2. Drop the ZIP into the inbox
+
+```bash
+mkdir -p data/whatsapp-exports
+mv ~/Downloads/'WhatsApp Chat - You.zip' data/whatsapp-exports/
+```
+
+Any filename works — the watcher polls for `*.zip` at the inbox root.
+
+### 3. Run the watcher
+
+One-shot (cron, manual, or first-run sanity check):
+
+```bash
+python -m workers.whatsapp_export_watcher once
+```
+
+Long-running daemon (60s polling, SIGTERM-safe):
+
+```bash
+python -m workers.whatsapp_export_watcher
+# or, after `pip install -e .`:
+whatsapp-export-watcher
+```
+
+### What it does to each ZIP
+
+1. Validates that the archive contains a `*.txt` transcript at its root
+   (filename varies: `_chat.txt`, `WhatsApp Chat with Me.txt`, …).
+2. Safely extracts to
+   `data/whatsapp-exports/.unpacked/<utc-timestamp>_<zipname>/` with
+   zip-slip, zip-bomb (2 GB total / 200 MB per file), and symlink
+   protections.
+3. Parses the transcript line by line. Both iOS (12-hour, U+200E
+   left-to-right marks, `[bracket]` separator) and Android (24-hour,
+   `-` separator) formats are supported. Date-locale ambiguity
+   (DD/MM/YYYY vs MM/DD/YYYY) is resolved by preferring `dayfirst=True`
+   (India), with a fallback to `dayfirst=False` for US locale exports.
+4. Multi-line messages, "Forwarded" markers, and system/banner lines
+   ("Messages and calls are end-to-end encrypted", "This message was
+   deleted", `<Media omitted>`) are handled as expected.
+5. Each message is dispatched as an `InboundEnvelope`:
+   - **URL in the body** → `message_type="url"`, routed through the
+     existing per-domain handlers (YouTube / Instagram / LinkedIn /
+     web fallback) just like a live WhatsApp message.
+   - **Plain text** → `message_type="text"`, raw handler writes it to
+     `vault/inbox/_raw/`.
+   - **Media** (image / video / audio voice note / document) →
+     `message_type=<type>`, raw handler writes a note carrying
+     `local_media_path` pointing at the extracted file in
+     `.unpacked/…/`. Component #5 will fetch + enrich those later.
+   - **Stickers** are dropped (parity with the live webhook).
+6. The processed ZIP is moved to
+   `data/whatsapp-exports/.processed/<utc-timestamp>/<zipname>`.
+
+### Idempotency
+
+Every message gets a deterministic
+`message_id = whatsapp_export:<sha256(sender|captured_at|body_or_filename)[:16]>`.
+Re-importing the same ZIP — or re-exporting the same chat next month —
+is a no-op: the shared SQLite dedupe table at `data/dedupe.db` absorbs
+the replay.
+
+### Env vars
+
+| Var                                 | Default              | Notes                                                                                  |
+|-------------------------------------|----------------------|----------------------------------------------------------------------------------------|
+| `WHATSAPP_EXPORT_INBOX_DIR`         | `data/whatsapp-exports` | Folder the watcher polls.                                                              |
+| `WHATSAPP_EXPORT_POLL_INTERVAL_S`   | `60`                 | Poll cadence. Monthly drops don't need sub-minute latency.                             |
+| `WHATSAPP_EXPORT_TZ`                | `Asia/Kolkata`       | IANA timezone applied to naive timestamps. The export file has no zone metadata — set this to your phone's timezone when the chat happened. |
