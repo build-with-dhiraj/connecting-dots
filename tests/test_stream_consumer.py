@@ -302,12 +302,22 @@ class TestProcessEntry:
 # run_once
 # --------------------------------------------------------------------------- #
 class _FakeRedis:
+    """Fakes the upstash-redis Redis client.
+
+    The upstash-redis Python SDK's `xread` signature is
+    `xread(streams: Dict[str, str], count: Optional[int] = None)` — there is
+    no `block` kwarg (the REST transport cannot block). We capture the kwargs
+    used by `run_once` so tests can assert the signature stays correct.
+    """
+
     def __init__(self, response: Any) -> None:
         self._response = response
-        self.calls: list[tuple[dict, int, int]] = []
+        self.calls: list[tuple[dict, dict]] = []  # (streams, kwargs)
 
-    def xread(self, streams: dict, count: int, block: int) -> Any:
-        self.calls.append((dict(streams), count, block))
+    def xread(self, streams: dict, *args: Any, **kwargs: Any) -> Any:
+        # Capture both the positional streams arg and whatever kwargs the
+        # caller passed so the regression test can assert `block` is absent.
+        self.calls.append((dict(streams), dict(kwargs)))
         return self._response
 
 
@@ -315,8 +325,9 @@ class TestRunOnce:
     def test_no_entries_returns_prior_offset(self, tmp_paths, dedupe_conn):
         stream_consumer._write_offset("100-0")
         fake = _FakeRedis(response=None)
-        last = stream_consumer.run_once(fake, dedupe_conn)
+        last, n = stream_consumer.run_once(fake, dedupe_conn)
         assert last == "100-0"
+        assert n == 0
         # Offset file unchanged.
         assert tmp_paths["offset"].read_text() == "100-0"
 
@@ -330,8 +341,9 @@ class TestRunOnce:
         ]
         fake = _FakeRedis(response=resp)
         with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
-            last = stream_consumer.run_once(fake, dedupe_conn)
+            last, n = stream_consumer.run_once(fake, dedupe_conn)
         assert last == "1700-0"
+        assert n == 1
         assert tmp_paths["offset"].read_text() == "1700-0"
         assert mock_dispatch.call_count == 1
 
@@ -343,8 +355,9 @@ class TestRunOnce:
         resp = [[stream_consumer.STREAM_KEY, entries]]
         fake = _FakeRedis(response=resp)
         with mock.patch.object(stream_consumer, "dispatch_envelope") as mock_dispatch:
-            last = stream_consumer.run_once(fake, dedupe_conn)
+            last, n = stream_consumer.run_once(fake, dedupe_conn)
         assert last == "1704-0"
+        assert n == 5
         assert tmp_paths["offset"].read_text() == "1704-0"
         assert mock_dispatch.call_count == 5
 
@@ -362,9 +375,24 @@ class TestRunOnce:
             "dispatch_envelope",
             side_effect=[None, RuntimeError("middle"), None],
         ):
-            last = stream_consumer.run_once(fake, dedupe_conn)
+            last, n = stream_consumer.run_once(fake, dedupe_conn)
         assert last == "1702-0"
+        assert n == 3
         assert tmp_paths["offset"].read_text() == "1702-0"
+
+    def test_xread_call_omits_block_kwarg(self, tmp_paths, dedupe_conn):
+        """Regression: upstash-redis Python SDK's `xread` does NOT accept a
+        `block` kwarg (REST transport can't block). Calling it with `block=`
+        raises TypeError at runtime. Lock in the signature.
+        """
+        fake = _FakeRedis(response=None)
+        stream_consumer.run_once(fake, dedupe_conn)
+        assert len(fake.calls) == 1
+        streams, kwargs = fake.calls[0]
+        assert streams == {stream_consumer.STREAM_KEY: "0-0"}
+        assert "block" not in kwargs
+        # `count` is the supported kwarg.
+        assert kwargs.get("count") == stream_consumer.BATCH_COUNT
 
 
 # --------------------------------------------------------------------------- #

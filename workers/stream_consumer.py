@@ -30,8 +30,12 @@ job) should inspect `data/dlq.jsonl` and decide.
 
 Other design notes
 ------------------
-- Upstash REST API + the official `upstash-redis` Python client. We use the
-  blocking `XREAD` with a 5-second timeout so SIGTERM is honoured promptly.
+- Upstash REST API + the official `upstash-redis` Python client. The Upstash
+  REST transport cannot do blocking reads, so the SDK's `XREAD` signature is
+  `xread(streams, count=None)` (no `block` kwarg). We poll: when the previous
+  read returned entries we retry immediately (drain bursts fast), and when it
+  returned nothing we sleep `STREAM_IDLE_SLEEP_S` seconds before the next read
+  (idle quietly). SIGTERM is honoured between sleeps.
 - Last-read stream ID is checkpointed atomically to `data/stream_offset.txt`
   so the worker is resumable across restarts.
 - Idempotency is keyed on `envelope.message_id` (WhatsApp `messages[].id` for
@@ -46,7 +50,7 @@ Env vars:
     UPSTASH_REDIS_REST_URL       Upstash REST endpoint
     UPSTASH_REDIS_REST_TOKEN     Upstash REST token
     STREAM_KEY                   default: inbound-stream
-    STREAM_BLOCK_MS              default: 5000 (XREAD blocking timeout)
+    STREAM_IDLE_SLEEP_S          default: 2.0 (polling cadence when last XREAD was empty)
     STREAM_BATCH_COUNT           default: 32
     STREAM_OFFSET_FILE           default: data/stream_offset.txt
     DEDUPE_DB_PATH               default: data/dedupe.db
@@ -74,7 +78,9 @@ from connecting_dots.inbound_envelope import InboundEnvelope
 logger = logging.getLogger(__name__)
 
 STREAM_KEY = os.environ.get("STREAM_KEY", "inbound-stream")
-BLOCK_MS = int(os.environ.get("STREAM_BLOCK_MS", "5000"))
+# Upstash REST transport cannot block, so we poll. Sleep this long when the
+# previous XREAD returned no entries; retry immediately when it returned some.
+IDLE_SLEEP_S = float(os.environ.get("STREAM_IDLE_SLEEP_S", "2.0"))
 BATCH_COUNT = int(os.environ.get("STREAM_BATCH_COUNT", "32"))
 OFFSET_FILE = Path(os.environ.get("STREAM_OFFSET_FILE", "data/stream_offset.txt"))
 DEDUPE_DB = Path(os.environ.get("DEDUPE_DB_PATH", "data/dedupe.db"))
@@ -299,18 +305,27 @@ def _process_entry(
         _append_dlq(stream_id, fields, str(exc))
 
 
-def run_once(redis: Redis, dedupe: sqlite3.Connection) -> str:
-    """Single XREAD cycle. Returns the latest stream_id seen (or the prior offset)."""
+def run_once(redis: Redis, dedupe: sqlite3.Connection) -> tuple[str, int]:
+    """Single (non-blocking) XREAD cycle.
+
+    Returns `(last_id, n_entries_processed)` so the polling loop can decide
+    whether to retry immediately (entries drained, more may be waiting) or
+    sleep (idle).
+
+    NOTE: Upstash REST cannot block, so we deliberately call `xread` without a
+    `block` kwarg — the official upstash-redis Python SDK signature is
+    `xread(streams: Dict[str, str], count: Optional[int] = None)`.
+    """
     last_id = _read_offset()
-    resp = redis.xread({STREAM_KEY: last_id}, count=BATCH_COUNT, block=BLOCK_MS)
+    resp = redis.xread({STREAM_KEY: last_id}, count=BATCH_COUNT)
     entries = _parse_xread_response(resp)
     if not entries:
-        return last_id
+        return last_id, 0
     for stream_id, fields in entries:
         _process_entry(stream_id, fields, dedupe)
         last_id = stream_id
     _write_offset(last_id)
-    return last_id
+    return last_id, len(entries)
 
 
 def run_forever() -> None:
@@ -321,18 +336,22 @@ def run_forever() -> None:
     _install_signal_handlers()
     redis = _get_redis()
     dedupe = _open_dedupe_db()
-    logger.info("[stream] consumer starting; key=%s offset=%s", STREAM_KEY, _read_offset())
+    logger.info(
+        "[stream] consumer starting; key=%s offset=%s idle_sleep=%.2fs",
+        STREAM_KEY, _read_offset(), IDLE_SLEEP_S,
+    )
     try:
         while not _shutdown:
             try:
-                run_once(redis, dedupe)
+                _, n = run_once(redis, dedupe)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("[stream] loop error: %s", exc)
-                # Brief sleep on transient REST errors. XREAD's block already
-                # paces us during normal operation.
-                if not _shutdown:
-                    import time as _t
-                    _t.sleep(2.0)
+                n = 0
+            # Drain bursts fast (immediate retry when entries arrived);
+            # idle quietly (sleep) when the read was empty. Honour SIGTERM
+            # by checking _shutdown between sleeps.
+            if n == 0 and not _shutdown:
+                time.sleep(IDLE_SLEEP_S)
     finally:
         dedupe.close()
         logger.info("[stream] consumer stopped")

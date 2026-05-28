@@ -17,6 +17,8 @@ dependencies = [
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
     "trafilatura>=2.0",
+    # LanceDB sidecar index (scripts/init_lancedb.py + future retrieval layer).
+    "lancedb>=0.13",
 ]
 
 [project.optional-dependencies]
