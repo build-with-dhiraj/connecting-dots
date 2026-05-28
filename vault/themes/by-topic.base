@@ -1,0 +1,116 @@
+# Connecting Dots — browse the vault by topic, entity, and source.
+#
+# Requires Obsidian 1.10+ (Bases is GA as of late 2025). Open this file
+# inside Obsidian; the four views below render as switchable tabs at the top.
+#
+# Scope: every captured note under `vault/sources/` and `vault/inbox/`.
+# Excludes the failure quarantine and the example seed note.
+filters:
+  and:
+    - 'file.ext == "md"'
+    - or:
+        - 'file.path.startsWith("sources/")'
+        - 'file.path.startsWith("inbox/")'
+    - not:
+        - 'file.path.startsWith("inbox/_failed/")'
+        - 'file.path == "inbox/example.md"'
+
+formulas:
+  # First entity / topic only — used to bucket the card views without
+  # exploding into N rows per note.
+  primary_topic: 'if(topics, topics[0], "(none)")'
+  primary_entity: 'if(entities, entities[0], "(none)")'
+  # Compact list of the first few entities for the table preview column.
+  entities_preview: 'if(entities, entities.slice(0, 5).join(", "), "")'
+  # Days since capture — useful in the recent view.
+  days_since_captured: 'if(captured_at, (now() - date(captured_at)).days, "")'
+
+properties:
+  file.name:
+    displayName: Title
+  source:
+    displayName: Source
+  handler:
+    displayName: Handler
+  captured_at:
+    displayName: Captured
+  topics:
+    displayName: Topics
+  formula.entities_preview:
+    displayName: Entities
+  formula.primary_topic:
+    displayName: Topic
+  formula.primary_entity:
+    displayName: Entity
+  formula.days_since_captured:
+    displayName: "Days Ago"
+
+views:
+  # ----------------------------------------------------------------------- #
+  # 1) Everything — table, newest first.
+  # ----------------------------------------------------------------------- #
+  - type: table
+    name: "All saves"
+    order:
+      - file.name
+      - source
+      - handler
+      - captured_at
+      - formula.entities_preview
+      - topics
+
+  # ----------------------------------------------------------------------- #
+  # 2) Group by topic — card grid clustered by the first topic.
+  # ----------------------------------------------------------------------- #
+  - type: cards
+    name: "By topic"
+    groupBy:
+      property: formula.primary_topic
+      direction: ASC
+    order:
+      - file.name
+      - source
+      - formula.entities_preview
+      - captured_at
+
+  # ----------------------------------------------------------------------- #
+  # 3) Group by entity — same shape, bucketed by first entity.
+  # ----------------------------------------------------------------------- #
+  - type: cards
+    name: "By entity"
+    groupBy:
+      property: formula.primary_entity
+      direction: ASC
+    order:
+      - file.name
+      - source
+      - topics
+      - captured_at
+
+  # ----------------------------------------------------------------------- #
+  # 4) Group by source — quick channel breakdown (WhatsApp / LinkedIn / …).
+  # ----------------------------------------------------------------------- #
+  - type: cards
+    name: "By source"
+    groupBy:
+      property: source
+      direction: ASC
+    order:
+      - file.name
+      - handler
+      - captured_at
+      - topics
+
+  # ----------------------------------------------------------------------- #
+  # 5) Recent saves — last 30 captured, gallery-style. Daily morning view.
+  # ----------------------------------------------------------------------- #
+  - type: cards
+    name: "Recent saves"
+    limit: 30
+    order:
+      - file.name
+      - source
+      - handler
+      - captured_at
+      - formula.days_since_captured
+      - topics

@@ -16,3 +16,16 @@ tsconfig.tsbuildinfo
 *.egg-info/
 # Next.js generated env types
 next-env.d.ts
+# Vault user data (runtime-ingested notes + Obsidian config + LanceDB state).
+# Tracked sentinels (.gitkeep, example.md, themes/*.base) still ship with the
+# repo so the directory structure exists on fresh clones.
+vault/inbox/*
+!vault/inbox/.gitkeep
+!vault/inbox/example.md
+vault/sources/**/*
+!vault/sources/**/.gitkeep
+vault/digests/*
+!vault/digests/.gitkeep
+vault/.obsidian/
+vault/.lancedb/
+!vault/.lancedb/.gitignore
