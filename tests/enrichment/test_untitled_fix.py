@@ -6,16 +6,13 @@ title_backfill --fix-untitled worker path.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 import yaml
 
 from connecting_dots.enrichment.title import (
-    call_llm_for_title,
     derive_better_title,
     parse_wa_media_filename,
 )
