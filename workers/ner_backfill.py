@@ -49,6 +49,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re as _re
 import sys
 import tempfile
 import time
@@ -109,18 +110,79 @@ def _is_already_enriched(fm: dict[str, Any]) -> bool:
 
 
 # Stable frontmatter key order — must match `lib/vault_writer/writer.py`
-# so re-serialization doesn't reshuffle existing notes' keys.
+# so re-serialization doesn't reshuffle existing notes' keys. `tags` is
+# inserted between `title` and `entities` so it sits with the other
+# user-facing labels at the top of the YAML block.
 _FRONTMATTER_ORDER = (
     "source",
     "handler",
     "captured_at",
     "url",
     "title",
+    "tags",
     "entities",
     "topics",
     "labels",
     "raw_meta",
 )
+
+
+# --------------------------------------------------------------------------- #
+# Entity / topic → tag mirroring
+# --------------------------------------------------------------------------- #
+_TAG_DROP_RE = _re.compile(r"[^a-z0-9\-]+")
+_TAG_COLLAPSE_RE = _re.compile(r"-{2,}")
+
+
+def _slugify_tag_part(value: str) -> str:
+    """Slugify a single entity/topic name into a tag-safe segment.
+
+    Lowercase, replace whitespace with `-`, drop everything that isn't
+    `[a-z0-9-]`, collapse runs of `-`, trim leading/trailing `-`.
+    Returns `""` if nothing usable survives.
+    """
+    if not value:
+        return ""
+    s = value.strip().lower().replace("_", "-")
+    s = _re.sub(r"\s+", "-", s)
+    s = _TAG_DROP_RE.sub("-", s)
+    s = _TAG_COLLAPSE_RE.sub("-", s)
+    return s.strip("-")
+
+
+def _merge_tags(existing: Any, new_tags: list[str]) -> list[str]:
+    """Set-union merge of existing tags + new tags. Preserves manual entries.
+
+    Obsidian accepts `tags:` as either a list or a single string; we always
+    write back a sorted list of `#…` strings so reruns are deterministic.
+    """
+    out: set[str] = set()
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, str) and item.strip():
+                out.add(item.strip())
+    elif isinstance(existing, str) and existing.strip():
+        for piece in existing.split():
+            if piece.strip():
+                out.add(piece.strip())
+    for tag in new_tags:
+        if tag:
+            out.add(tag)
+    return sorted(out)
+
+
+def _entity_topic_tags(entities: list[str], topics: list[str]) -> list[str]:
+    """Build `#entity/<slug>` and `#topic/<slug>` tags from extraction output."""
+    tags: list[str] = []
+    for e in entities or []:
+        slug = _slugify_tag_part(str(e))
+        if slug:
+            tags.append(f"#entity/{slug}")
+    for t in topics or []:
+        slug = _slugify_tag_part(str(t))
+        if slug:
+            tags.append(f"#topic/{slug}")
+    return tags
 
 
 def _ordered(meta: dict[str, Any]) -> dict[str, Any]:
@@ -232,6 +294,18 @@ def _enrich_one_sync(note_path: Path, model: Optional[str], vault_root: Path) ->
     new_fm = dict(fm)
     new_fm["entities"] = list(result.entities)
     new_fm["topics"] = list(result.topics)
+
+    # Mirror entities + topics into `tags:` so Obsidian's graph view + tag
+    # panel cluster notes by semantic concept. Merged as a set union so
+    # `#source/*` / `#ingest/*` tags from workers.domain_tag_backfill are
+    # preserved, and re-runs are byte-stable. On extraction failure we still
+    # keep whatever tags are already on the note — we just don't add the
+    # entity/topic ones.
+    if not result.error:
+        mirrored = _entity_topic_tags(list(result.entities), list(result.topics))
+        if mirrored:
+            new_fm["tags"] = _merge_tags(new_fm.get("tags"), mirrored)
+
     raw_meta = dict(new_fm.get("raw_meta") or {})
     if result.error:
         # Failed extraction: record the error but do NOT stamp ner_enriched_at /
