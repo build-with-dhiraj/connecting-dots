@@ -235,9 +235,6 @@ def test_atomic_write_preserves_frontmatter(tmp_vault, monkeypatch):
 # Concurrency default = 3
 # --------------------------------------------------------------------------- #
 def test_concurrency_default_3():
-    import inspect
-    sig = inspect.signature(body_cleanup_backfill._run_batch)
-    # Verify the default in the module constant, not the function signature
     assert body_cleanup_backfill.DEFAULT_CONCURRENCY == 3
 
 
