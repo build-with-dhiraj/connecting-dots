@@ -56,8 +56,8 @@ def normalize_key(tag: str) -> str:
     raw = re.sub(r"[\s_]+", " ", raw)
 
     def _hyphens(m: re.Match) -> str:
-        l, r = m.group(1), m.group(2)
-        return (l + r) if (len(l) == 1 and len(r) == 1) else (l + " " + r)
+        left, right = m.group(1), m.group(2)
+        return (left + right) if (len(left) == 1 and len(right) == 1) else (left + " " + right)
 
     raw = re.sub(r"([a-z0-9]+)-([a-z0-9]+)", _hyphens, raw)
     raw = re.sub(r"[^a-z0-9\s]", "", raw)
