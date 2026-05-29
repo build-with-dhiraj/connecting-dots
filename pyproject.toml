@@ -27,6 +27,8 @@ dependencies = [
     "openai>=1.50",
     # Backfill progress bar.
     "tqdm>=4.66",
+    # Auto-load repo-root .env at package import time (override=False keeps CI safe).
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
