@@ -46,7 +46,7 @@ from connecting_dots.types import NoteRecord
 
 logger = logging.getLogger(__name__)
 
-SourceChannel = Literal["whatsapp", "mailto", "linkedin", "manual", "youtube"]
+SourceChannel = Literal["whatsapp", "mailto", "linkedin", "manual", "youtube", "instagram"]
 
 # ---------------------------------------------------------------------------
 # Handler registry — explicit, ordered, specific-before-generic.
