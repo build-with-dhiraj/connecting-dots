@@ -244,24 +244,25 @@ def test_captured_at_fallback_when_no_timestamp_column(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_dry_run_leaves_file_in_place(tmp_path: Path) -> None:
-    """sweep_once with a no-op dispatch (dry-run simulation) must not move the file."""
+    """sweep_once(dry_run=True) must not call dispatch and must not move the ZIP."""
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     zip_path = inbox / "export.zip"
     _yt_zip(tmp_path).rename(zip_path)
 
-    dispatched: list[str] = []
+    dispatch_calls: list[dict] = []
 
-    # Simulate dry-run: pass a no-op dispatch but process normally.
-    # The watcher does not natively have --dry-run; we test the pattern by
-    # verifying dispatch is called 0 times when we don't call sweep_once.
-    # Actually test that with a real dispatch mock sweep_once DOES move the file,
-    # and a dry-run (no sweep call) leaves it in place.
-    assert zip_path.exists()  # file still there before sweep
+    def _spy_dispatch(**kw):  # type: ignore[no-untyped-def]
+        dispatch_calls.append(kw)
 
-    # Dry-run means caller skips sweep_once. File must remain.
-    assert zip_path.exists()
-    assert len(dispatched) == 0
+    total = sweep_once(inbox, dispatch=_spy_dispatch, dry_run=True)
+
+    # Dispatch must never be called in dry-run mode.
+    assert dispatch_calls == [], "dry-run must not call dispatch"
+    # The ZIP must remain in the inbox — no move to .processed.
+    assert zip_path.exists(), "dry-run must not move ZIP to .processed"
+    # But the count reported should equal the number of parseable videos.
+    assert total > 0, "dry-run should still report parseable video count"
 
 
 # ---------------------------------------------------------------------------
@@ -295,3 +296,31 @@ def test_sweep_once_counts_dispatches(tmp_path: Path) -> None:
     assert all(u.startswith("https://www.youtube.com/watch?v=") for u in urls)
     # Processed ZIP moved out of inbox
     assert not (inbox / "takeout.zip").exists()
+
+
+# ---------------------------------------------------------------------------
+# 15. Bug 3 regression: ZIP stays in inbox when every dispatch raises
+# ---------------------------------------------------------------------------
+
+def test_zip_stays_in_inbox_when_all_dispatches_fail(tmp_path: Path) -> None:
+    """sweep_once must NOT archive the ZIP when every dispatch call raises.
+
+    Previously the ZIP was moved unconditionally, permanently silencing
+    failures and making data recovery impossible.
+    """
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    zip_path = inbox / "export.zip"
+    _yt_zip(tmp_path).rename(zip_path)
+
+    def _always_raise(**kw):  # type: ignore[no-untyped-def]
+        raise RuntimeError("simulated downstream failure")
+
+    total = sweep_once(inbox, dispatch=_always_raise)
+
+    # No URLs were successfully dispatched.
+    assert total == 0
+    # The ZIP must remain in the inbox so a re-run can retry it.
+    assert zip_path.exists(), "ZIP must stay in inbox when all dispatches failed"
+    processed_dir = inbox / ".processed"
+    assert not any(processed_dir.iterdir()) if processed_dir.exists() else True

@@ -307,10 +307,16 @@ def process_zip(
     *,
     unpacked_root: Path,
     dispatch: Callable[..., None] = dispatch_url,
-) -> int:
+    dry_run: bool = False,
+) -> tuple[int, int]:
     """Extract `zip_path` and dispatch every saved-video row.
 
-    Returns the count of dispatched URLs.
+    Returns ``(dispatched, failed)`` counts.
+    - In normal mode: ``dispatched`` = rows handed to ``dispatch`` successfully;
+      ``failed`` = rows where ``dispatch`` raised.
+    - In dry-run mode: ``dispatch`` is never called; ``dispatched`` = rows that
+      *would* be dispatched (accurate parse count), ``failed`` = 0.
+
     Raises `UnprocessableZip` for non-Takeout or adversarial archives.
     """
     if not zipfile.is_zipfile(zip_path):
@@ -334,6 +340,7 @@ def process_zip(
             raise UnprocessableZip(str(exc)) from exc
 
     dispatched = 0
+    failed = 0
     # Only walk playlists CSVs; skip everything else (history, subscriptions).
     for csv_file in sorted(dest.rglob("*.csv")):
         # Rebuild relative path to check if inside playlists dir.
@@ -348,10 +355,15 @@ def process_zip(
         playlist_name = csv_file.stem  # e.g. "Watch later", "Liked videos"
         try:
             for row in _iter_playlist_csv(csv_file, playlist_name):
+                if dry_run:
+                    # Dry-run: count parsed rows but call NO dispatch and touch NO state.
+                    dispatched += 1
+                    continue
                 try:
                     _emit(row, dispatch=dispatch)
                     dispatched += 1
                 except Exception:  # noqa: BLE001
+                    failed += 1
                     logger.exception(
                         "[youtube-takeout] dispatch failed for url=%s (file=%s)",
                         row.url,
@@ -360,8 +372,16 @@ def process_zip(
         except Exception:  # noqa: BLE001
             logger.exception("[youtube-takeout] failed parsing %s", csv_file.name)
 
-    logger.info("[youtube-takeout] %s → dispatched=%d", zip_path.name, dispatched)
-    return dispatched
+    if dry_run:
+        logger.info(
+            "[youtube-takeout] dry-run %s → would-dispatch=%d", zip_path.name, dispatched
+        )
+    else:
+        logger.info(
+            "[youtube-takeout] %s → dispatched=%d failed=%d",
+            zip_path.name, dispatched, failed,
+        )
+    return dispatched, failed
 
 
 # --- inbox sweep -------------------------------------------------------------
@@ -395,20 +415,57 @@ def sweep_once(
     inbox: Path | None = None,
     *,
     dispatch: Callable[..., None] = dispatch_url,
+    dry_run: bool = False,
 ) -> int:
-    """Process every pending ZIP in the inbox. Returns total URLs dispatched."""
+    """Process every pending ZIP in the inbox. Returns total URLs dispatched (or parsed in dry-run).
+
+    dry_run=True: parses ZIPs and reports the count of videos that WOULD be
+    dispatched, but calls no dispatch and moves no files. Safe to run against
+    live data without side-effects.
+
+    A ZIP is only archived to .processed/ when:
+    - dry_run is False, AND
+    - processing completed with zero dispatch failures (failed == 0).
+    If any dispatch raised, the ZIP is left in the inbox so a re-run after the
+    underlying issue is fixed can recover the data.
+    """
     inbox = inbox or _inbox_dir()
     unpacked, processed = _ensure_dirs(inbox)
 
     total = 0
     for zip_path in _list_pending_zips(inbox):
         try:
-            total += process_zip(zip_path, unpacked_root=unpacked, dispatch=dispatch)
+            dispatched, failed = process_zip(
+                zip_path, unpacked_root=unpacked, dispatch=dispatch, dry_run=dry_run
+            )
         except UnprocessableZip:
             continue
         except Exception:  # noqa: BLE001
             logger.exception("[youtube-takeout] unhandled error on %s", zip_path.name)
             continue
+
+        total += dispatched
+
+        if dry_run:
+            # Dry-run: never move files, never touch external state.
+            logger.info(
+                "[youtube-takeout] dry-run: %s would dispatch %d videos (not moved)",
+                zip_path.name, dispatched,
+            )
+            continue
+
+        if failed > 0:
+            # Partial or total failure: leave the ZIP in the inbox so it can
+            # be retried once the underlying error (handler, network, vault) is
+            # fixed. Silently archiving a partially-failed ZIP would cause data
+            # loss because those rows would never be re-dispatched.
+            logger.warning(
+                "[youtube-takeout] %s had %d dispatch failure(s); leaving in inbox for retry",
+                zip_path.name, failed,
+            )
+            continue
+
+        # Clean run: archive to .processed/ (collision-safe).
         target = processed / zip_path.name
         if target.exists():
             target = processed / f"{zip_path.stem}.{int(time.time())}{zip_path.suffix}"
@@ -460,8 +517,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     cmd = argv[0] if argv else "run"
     if cmd == "once":
-        n = sweep_once()
-        print(f"dispatched={n}")
+        dry_run = "--dry-run" in argv
+        n = sweep_once(dry_run=dry_run)
+        label = "would-dispatch" if dry_run else "dispatched"
+        print(f"{label}={n}")
         return 0
     if cmd in ("run", "daemon"):
         run_forever()

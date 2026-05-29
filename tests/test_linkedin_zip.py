@@ -410,3 +410,51 @@ def test_handler_falls_back_to_url_slug_when_export_has_no_title() -> None:
     )
     record = LinkedInHandler().handle(env)
     assert record.title.lower().replace(" ", "-") == "some-cool-article"
+
+
+# --------------------------------------------------------------------------- #
+# Bug 2 regression: dry_run dispatches nothing and leaves ZIP in inbox
+# --------------------------------------------------------------------------- #
+
+def test_dry_run_dispatches_nothing_and_leaves_zip(tmp_path: Path) -> None:
+    """sweep_once(dry_run=True) must not call dispatch and must not move the ZIP."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    zip_path = _make_export_zip(inbox / "export.zip")
+
+    dispatch_calls: list[Any] = []
+
+    def _spy(**kw: Any) -> None:
+        dispatch_calls.append(kw)
+
+    total = w.sweep_once(inbox, dispatch=_spy, dry_run=True)
+
+    assert dispatch_calls == [], "dry-run must not call dispatch"
+    assert zip_path.exists(), "dry-run must not move ZIP to .processed"
+    # Should still report a non-zero parseable count (2 saved + 1 reaction).
+    assert total == 3
+
+
+# --------------------------------------------------------------------------- #
+# Bug 3 regression: ZIP stays in inbox when every dispatch raises
+# --------------------------------------------------------------------------- #
+
+def test_zip_stays_in_inbox_when_all_dispatches_fail(tmp_path: Path) -> None:
+    """sweep_once must NOT archive the ZIP when every dispatch call raises.
+
+    Previously the ZIP was moved unconditionally, permanently silencing
+    failures and making data recovery impossible.
+    """
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    zip_path = _make_export_zip(inbox / "export.zip")
+
+    def _always_raise(**kw: Any) -> None:
+        raise RuntimeError("simulated downstream failure")
+
+    total = w.sweep_once(inbox, dispatch=_always_raise)
+
+    assert total == 0
+    assert zip_path.exists(), "ZIP must stay in inbox when all dispatches failed"
+    processed_dir = inbox / ".processed"
+    assert not any(processed_dir.iterdir()) if processed_dir.exists() else True
