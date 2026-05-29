@@ -46,7 +46,7 @@ from connecting_dots.types import NoteRecord
 
 logger = logging.getLogger(__name__)
 
-SourceChannel = Literal["whatsapp", "mailto", "linkedin", "manual"]
+SourceChannel = Literal["whatsapp", "mailto", "linkedin", "manual", "youtube"]
 
 # ---------------------------------------------------------------------------
 # Handler registry — explicit, ordered, specific-before-generic.
@@ -342,7 +342,19 @@ def dispatch_url(
     """
     payload = raw_payload or {}
 
+    # Build and validate the envelope FIRST so that a ValidationError on bad
+    # input does NOT permanently consume the message_id in the dedupe table.
+    # A claimed-but-never-written id would make the URL unrecoverable on
+    # re-ingestion (the exact failure mode that poisoned 297 YouTube ids).
+    # Order must be: build_envelope → claim_id → run_handler → write_record.
+    envelope = _build_envelope(
+        url=url, source=source, captured_at=captured_at,
+        raw_payload=payload, message_id=message_id,
+    )
+
     # Idempotency: same message twice = no-op.
+    # Claimed only AFTER a valid envelope is in hand so a validation failure
+    # leaves the dedupe DB untouched and the caller can retry.
     if message_id:
         conn = _open_dedupe(dedupe_db)
         try:
@@ -351,11 +363,6 @@ def dispatch_url(
                 return None
         finally:
             conn.close()
-
-    envelope = _build_envelope(
-        url=url, source=source, captured_at=captured_at,
-        raw_payload=payload, message_id=message_id,
-    )
 
     handlers = get_handlers()
     try:

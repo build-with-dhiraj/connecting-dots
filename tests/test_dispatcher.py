@@ -399,6 +399,66 @@ def test_dispatch_envelope_interactive_invalid_row_id_falls_through_to_raw(
     assert result.handler == "raw"
 
 
+def test_validation_failure_does_not_claim_dedupe_id(
+    captured_writes: list[dict[str, Any]],
+    isolated_dedupe: Path,
+) -> None:
+    """Bug 1 regression: a ValidationError from _build_envelope must NOT claim
+    the message_id in the dedupe table.  A subsequent valid dispatch of the
+    SAME message_id must succeed and write a note — previously it was silently
+    dropped because the id was already marked 'seen'."""
+    import sqlite3
+
+    web = _AlwaysMatchHandler(name="web")
+    dispatcher.set_handlers([web])
+
+    mid = "regression-bug1-dedupe"
+
+    # First call: pass an invalid source so _build_envelope raises ValidationError.
+    # (source="__invalid__" is not in the enum so Pydantic will reject it.)
+    try:
+        dispatcher.dispatch_url(
+            url="https://example.com/will-fail-validation",
+            source="__invalid_source__",  # type: ignore[arg-type]
+            captured_at=_now(),
+            raw_payload={},
+            message_id=mid,
+        )
+    except Exception:  # noqa: BLE001 — we expect a ValidationError to surface
+        pass
+
+    # The dedupe DB must NOT contain our message_id after the failed call.
+    # If the DB file doesn't even exist yet, the id was definitely not claimed.
+    if isolated_dedupe.exists():
+        conn = sqlite3.connect(str(isolated_dedupe))
+        try:
+            row = conn.execute(
+                "SELECT message_id FROM seen_message_ids WHERE message_id = ? "
+                "/* table may not exist if dedupe was never opened */",
+                (mid,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None  # table doesn't exist — id was definitely not claimed
+        finally:
+            conn.close()
+        assert row is None, (
+            "message_id was claimed despite envelope validation failure — "
+            "this is the bug that poisoned 297 YouTube ids"
+        )
+
+    # Second call: same message_id, now with a valid source — must succeed.
+    record = dispatcher.dispatch_url(
+        url="https://example.com/will-fail-validation",
+        source="whatsapp",
+        captured_at=_now(),
+        raw_payload={},
+        message_id=mid,
+    )
+    assert record is not None, "valid retry after validation failure must produce a record"
+    assert len(captured_writes) == 1
+
+
+
 def test_missing_handler_module_does_not_break_registry(
     monkeypatch: pytest.MonkeyPatch,
     captured_writes: list[dict[str, Any]],

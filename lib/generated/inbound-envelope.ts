@@ -63,7 +63,7 @@ export interface InboundEnvelope {
   /**
    * Origin channel — must match `connecting_dots.dispatcher.SourceChannel`.
    */
-  source: "whatsapp" | "mailto" | "linkedin" | "manual";
+  source: "whatsapp" | "mailto" | "linkedin" | "manual" | "youtube";
   /**
    * ISO 8601 timestamp when the ingest channel received the message.
    */
