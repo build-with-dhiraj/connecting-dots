@@ -29,6 +29,11 @@ dependencies = [
     "tqdm>=4.66",
     # Auto-load repo-root .env at package import time (override=False keeps CI safe).
     "python-dotenv>=1.0",
+    # YouTube Data API v3 sync worker.
+    "google-api-python-client>=2.100",
+    "google-auth>=2.23",
+    "google-auth-oauthlib>=1.1",
+    "google-auth-httplib2>=0.2",
 ]
 
 [project.optional-dependencies]
