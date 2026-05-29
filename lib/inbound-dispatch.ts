@@ -59,7 +59,7 @@ function getRedis(): Redis | null {
 
 /** Lightweight runtime validation (schema-equivalent). Avoids pulling AJV at the edge. */
 function validateEnvelope(env: InboundEnvelope): void {
-  const allowedSources = ["whatsapp", "mailto", "linkedin", "manual"] as const;
+  const allowedSources = ["whatsapp", "mailto", "linkedin", "manual", "youtube"] as const;
   const allowedTypes = [
     "url",
     "text",

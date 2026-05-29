@@ -67,7 +67,7 @@
     },
     "source": {
       "type": "string",
-      "enum": ["whatsapp", "mailto", "linkedin", "manual"],
+      "enum": ["whatsapp", "mailto", "linkedin", "manual", "youtube"],
       "description": "Origin channel — must match `connecting_dots.dispatcher.SourceChannel`."
     },
     "captured_at": {
