@@ -458,6 +458,7 @@ def test_validation_failure_does_not_claim_dedupe_id(
     assert len(captured_writes) == 1
 
 
+
 def test_missing_handler_module_does_not_break_registry(
     monkeypatch: pytest.MonkeyPatch,
     captured_writes: list[dict[str, Any]],
