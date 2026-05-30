@@ -3,7 +3,8 @@
 Triage notes whose `raw_meta.transcript_unavailable == true`, check caption
 availability via the YouTube Data API, then attempt to recover the transcript
 with youtube-transcript-api.  Recovered transcripts are written back to the
-note body; a one-sentence Azure OpenAI tldr is appended to the frontmatter.
+note body and `raw_meta.transcript_recovered_at` is stamped.  TLDR generation
+is handled separately by `workers/tldr_backfill.py`.
 
 Commands:
     triage   — scan vault, batch-check caption flag, stamp checked_at
@@ -21,11 +22,10 @@ Env:
     VAULT_ROOT                default vault directory
     YT_TRANSCRIPT_DELAY_S     base sleep between transcript fetches (default 4)
     YT_TRANSCRIPT_JITTER_S    max random jitter on top (default 2)
-    AZURE_OPENAI_ENDPOINT     required for tldr generation
-    AZURE_OPENAI_API_KEY      required for tldr generation
-    AZURE_OPENAI_API_VERSION  optional (defaults to 2024-10-21)
 """
 from __future__ import annotations
+
+import connecting_dots  # noqa: F401
 
 import argparse
 import logging
@@ -308,57 +308,6 @@ def _join_snippets(snippets: list[dict[str, Any]], max_chars: int = 600) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Azure OpenAI tldr (reuse _get_client from ner.py)
-# ---------------------------------------------------------------------------
-
-def _get_azure_client():
-    """Build (or reuse) an AzureOpenAI client from env."""
-    from openai import AzureOpenAI  # type: ignore[import-not-found]
-
-    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-    api_key = os.environ.get("AZURE_OPENAI_API_KEY", "")
-    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
-    return AzureOpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version)
-
-
-def _generate_tldr(title: str, body: str, client=None) -> str | None:
-    """Generate a one-sentence tldr via gpt-4.1.  Returns None on failure."""
-    try:
-        api = client or _get_azure_client()
-        model = (
-            os.environ.get("NER_MODEL")
-            or os.environ.get("AZURE_OPENAI_DEPLOYMENT")
-            or "gpt-4.1"
-        )
-        truncated = body[:4000]
-        response = api.chat.completions.create(
-            model=model,
-            max_tokens=100,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a concise summarizer. Given a video title and transcript, "
-                        "produce exactly ONE sentence (under 30 words) summarising the core idea."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Title: {title or '(untitled)'}\nTranscript: {truncated}",
-                },
-            ],
-        )
-        choices = getattr(response, "choices", None) or []
-        if choices:
-            message = getattr(choices[0], "message", None)
-            if message:
-                return (getattr(message, "content", None) or "").strip() or None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[transcript-recovery] tldr generation failed: %s", exc)
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Phase A — Triage
 # ---------------------------------------------------------------------------
 
@@ -471,7 +420,6 @@ def recover(
     delay_s: float = _DEFAULT_DELAY,
     jitter_s: float = _DEFAULT_JITTER,
     limit: int | None = None,
-    azure_client=None,
 ) -> int:
     """Try to fetch and write transcripts for candidate notes.
 
@@ -482,7 +430,6 @@ def recover(
         delay_s: base sleep between requests.
         jitter_s: max random jitter added to delay.
         limit: max recoveries; None = unlimited.
-        azure_client: injected AzureOpenAI client for tests.
 
     Returns:
         Number of successfully recovered transcripts.
@@ -581,13 +528,6 @@ def recover(
                 raw_meta["transcript_recovered_at"] = now
                 fm["raw_meta"] = raw_meta
 
-                # Generate tldr
-                title = fm.get("title") or ""
-                tldr = _generate_tldr(title, transcript_text, client=azure_client)
-                if tldr:
-                    fm["tldr"] = tldr
-                    raw_meta["tldr_generated_at"] = now
-
                 if not dry_run:
                     _write_note_atomic(path, fm, new_body)
                     logger.info("[recover] recovered transcript for %s (%s)", video_id, path.name)
@@ -609,11 +549,6 @@ def recover(
             # Do NOT reset consecutive_blocks here — we keep tracking across the pause.
 
     return recovered
-
-
-# ---------------------------------------------------------------------------
-# Phase C is embedded in recover() above (tldr generated per recovered note)
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

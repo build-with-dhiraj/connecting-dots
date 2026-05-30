@@ -175,7 +175,6 @@ def test_recover_writes_transcript_body(tmp_path):
     snippets = [{"text": "This is the recovered transcript.", "start": 0.0, "duration": 2.0}]
 
     with patch("workers.youtube_transcript_recovery._fetch_transcript", return_value=(snippets, "en")), \
-         patch("workers.youtube_transcript_recovery._generate_tldr", return_value=None), \
          patch("workers.youtube_transcript_recovery.time.sleep"):
         recover([(path, _read_fm(path), vid)], caption_true=True, dry_run=False)
 
@@ -194,7 +193,6 @@ def test_recover_stamps_recovered_at_and_clears_flag(tmp_path):
     snippets = [{"text": "Some content.", "start": 0.0, "duration": 1.5}]
 
     with patch("workers.youtube_transcript_recovery._fetch_transcript", return_value=(snippets, "en")), \
-         patch("workers.youtube_transcript_recovery._generate_tldr", return_value=None), \
          patch("workers.youtube_transcript_recovery.time.sleep"):
         recover([(path, _read_fm(path), vid)], caption_true=True, dry_run=False)
 
@@ -216,7 +214,6 @@ def test_recover_sleeps_between_requests(tmp_path):
     snippets = [{"text": "Text.", "start": 0.0, "duration": 1.0}]
 
     with patch("workers.youtube_transcript_recovery._fetch_transcript", return_value=(snippets, "en")), \
-         patch("workers.youtube_transcript_recovery._generate_tldr", return_value=None), \
          patch("workers.youtube_transcript_recovery.time.sleep") as mock_sleep:
         recover(candidates, caption_true=True, dry_run=False, delay_s=1.0, jitter_s=0.0)
 
@@ -318,7 +315,6 @@ def test_dry_run_writes_nothing(tmp_path):
     snippets = [{"text": "Should not be written.", "start": 0.0, "duration": 1.0}]
 
     with patch("workers.youtube_transcript_recovery._fetch_transcript", return_value=(snippets, "en")), \
-         patch("workers.youtube_transcript_recovery._generate_tldr", return_value="A tldr."), \
          patch("workers.youtube_transcript_recovery.time.sleep"):
         recovered = recover(
             [(path, _read_fm(path), vid)],
@@ -331,34 +327,25 @@ def test_dry_run_writes_nothing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Test 11 — tldr written to frontmatter after recovery (mock Azure)
+# Test 11 — recover() makes no LLM/Azure call
 # ---------------------------------------------------------------------------
 
-def test_tldr_written_to_frontmatter_after_recovery(tmp_path):
-    vid = "tldrvideo1234"
+def test_recover_makes_no_azure_call(tmp_path):
+    vid = "noazurecall1"
     path = _make_note(tmp_path, vid)
 
     snippets = [{"text": "Interesting content.", "start": 0.0, "duration": 2.0}]
 
-    mock_azure = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock(message=MagicMock(content="This video is about interesting content."))]
-    mock_azure.chat.completions.create.return_value = mock_response
-
     with patch("workers.youtube_transcript_recovery._fetch_transcript", return_value=(snippets, "en")), \
-         patch("workers.youtube_transcript_recovery.time.sleep"):
+         patch("workers.youtube_transcript_recovery.time.sleep"), \
+         patch("openai.AzureOpenAI") as mock_azure_cls:
         recover(
             [(path, _read_fm(path), vid)],
             caption_true=True,
             dry_run=False,
-            azure_client=mock_azure,
         )
 
-    fm = _read_fm(path)
-    assert "tldr" in fm
-    assert fm["tldr"] == "This video is about interesting content."
-    raw_meta = fm.get("raw_meta") or {}
-    assert "tldr_generated_at" in raw_meta
+    mock_azure_cls.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +360,6 @@ def test_limit_stops_after_n_recoveries(tmp_path):
     snippets = [{"text": "Content.", "start": 0.0, "duration": 1.0}]
 
     with patch("workers.youtube_transcript_recovery._fetch_transcript", return_value=(snippets, "en")), \
-         patch("workers.youtube_transcript_recovery._generate_tldr", return_value=None), \
          patch("workers.youtube_transcript_recovery.time.sleep"):
         n = recover(candidates, caption_true=True, dry_run=False, limit=2)
 
